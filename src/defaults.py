@@ -1,4 +1,4 @@
-# Copyright 2026 Matias Piipari
+# Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 """Constants describing the Hindsight workload container layout.
 

@@ -1,4 +1,4 @@
-# Copyright 2026 Matias Piipari
+# Copyright 2026 Canonical Ltd.
 # See LICENSE file for licensing details.
 """Pure functions that turn charm config, secrets and relation data into
 the environment for the Hindsight API and Control Plane services.

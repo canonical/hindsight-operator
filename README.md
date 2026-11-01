@@ -1,148 +1,86 @@
-# Hindsight (Kubernetes charm)
+# Hindsight Operator
 
-A [Juju](https://juju.is) Kubernetes charm, written with the
-[ops](https://ops.readthedocs.io) framework, that operates
-[Hindsight](https://github.com/vectorize-io/hindsight) — Vectorize's
-agent-memory system that retains, recalls, and reflects on world facts,
-experiences, and mental models.
+## Description
 
-It is the Kubernetes counterpart of the
-[Hindsight Workshop SDK](https://github.com/mz2/hindsight-sdk) and keeps the
-same shape and defaults:
+The Hindsight Operator deploys and operates [Hindsight](https://github.com/vectorize-io/hindsight), Vectorize's agent-memory server, on Kubernetes.
 
-| Workshop SDK                                   | This charm                                              |
-| ---------------------------------------------- | ------------------------------------------------------- |
-| `hindsight-api` systemd user service (:8888)    | `hindsight-api` Pebble service (:8888)                   |
-| `hindsight-control-plane` service (:9999)       | `hindsight-control-plane` Pebble service (:9999)         |
-| `~/.hindsight/server.env` (LLM provider)        | `llm-*` config options + `env-secret` Juju secret        |
-| `HINDSIGHT_API_LLM_PROVIDER=none` default       | `llm-provider=none` default                              |
-| `hindsight-pg-embedded` mount (`~/.pg0`)        | `data` storage at `/home/hindsight/.pg0`                 |
-| `llm-endpoint` tunnel to a host Ollama          | `llm-base-url`, e.g. an in-cluster Ollama Service        |
-| `hindsight-api` / `-control-plane` tunnel slots | Kubernetes Service ports, `ingress` relation for the API |
-| `check-health` hook (`/health`)                 | Pebble `ready` check on `/health` → unit status          |
+This operator provides:
+- The Hindsight API (port 8888) and Control Plane web UI (port 9999)
+- An embedded PostgreSQL for single-unit deployments
+- An external PostgreSQL with pgvector, for scaling out with shared memory
+- LLM provider configuration, with keys held in a Juju secret
+- Optional API-key authentication
+- Ingress for the API
 
-On top of that, the charm can use an external PostgreSQL over the `database`
-relation, which is what makes it scale beyond one unit.
+It is the Kubernetes counterpart of the [Hindsight Workshop SDK](https://github.com/mz2/hindsight-sdk) and uses the upstream `ghcr.io/vectorize-io/hindsight` image.
 
-> Hindsight is Apache-2.0 licensed by Vectorize. This charm is an independent
-> packaging effort, also Apache-2.0.
+## Usage
 
-## Requirements
+Bootstrap a Kubernetes controller to Juju (Juju 3.3+) and create a model:
 
-- Juju 3.3+ on a Kubernetes cloud (Canonical K8s, MicroK8s, EKS, …).
-- The workload image defaults to the upstream standalone image
-  `ghcr.io/vectorize-io/hindsight` (amd64 and arm64). It is large because it
-  bundles local embedding/reranker models.
+```shell
+juju add-model hindsight
+```
 
-## Quick start (embedded database)
+To deploy a single unit with the embedded database:
 
-```bash
+```shell
 charmcraft pack
-juju deploy ./hindsight_arm64.charm hindsight \
+juju deploy ./hindsight_amd64.charm hindsight \
   --resource hindsight-image=ghcr.io/vectorize-io/hindsight:0.9.2
-juju status --watch 5s   # hindsight/0 ... active  embedded database
 ```
 
-With no `database` relation, Hindsight runs its embedded PostgreSQL (pg0) on
-the `data` storage volume, like the Workshop SDK. That mode is limited to a
-**single unit**, because each pod would otherwise get its own separate memory.
-If you add a unit, the unit whose volume already holds the memories keeps
-serving (status `embedded database; other units blocked`), and the new units
-block until you relate PostgreSQL or scale back down.
+The embedded database lives on the `data` storage volume and supports one unit. Data is not migrated between the embedded and an external database.
 
-## Production: PostgreSQL with pgvector
+### LLM provider
 
-Hindsight needs the `vector` extension, and a relation user is not allowed to
-create it. Enable the plugin on the PostgreSQL charm first:
+By default `llm-provider=none`: retain and recall work, but reflection does not. To use a provider, put its key in a Juju secret:
 
-```bash
-juju deploy postgresql-k8s --channel 14/stable --trust \
-  --config plugin_vector_enable=true      # 16/edge: plugin-vector-enable=true
-juju deploy ./hindsight_arm64.charm hindsight \
-  --resource hindsight-image=ghcr.io/vectorize-io/hindsight:0.9.2 \
-  --config allow-embedded-database=false
-juju integrate hindsight postgresql-k8s
-juju add-unit hindsight -n 2               # units share the same memory
-```
-
-Data is **not** migrated when moving between embedded and external databases.
-Once a unit has used the external database, removing the `database` relation
-blocks it (`database relation removed: …`) instead of silently switching to an
-empty pg0. Relate PostgreSQL again, or, if you really want to start over on
-the embedded database, run:
-
-```bash
-juju run hindsight/0 use-embedded-database
-```
-
-To use a PostgreSQL that Juju doesn't manage (for example RDS or Cloud SQL),
-put `database-url=postgresql://…` in `env-secret` instead of relating. The
-`database` relation always takes precedence over that URL.
-
-## Configuring an LLM
-
-By default `llm-provider=none`. Retain and recall still work, but LLM-only
-operations (reflect, mental-model refresh) are disabled. That is the right
-mode when a client such as Hermes owns the conversational LLM and uses
-Hindsight only as its memory backend.
-
-Cloud provider, with the key held in a Juju secret:
-
-```bash
+```shell
 juju add-secret hindsight-keys llm-api-key=sk-...
 juju grant-secret hindsight-keys hindsight
 juju config hindsight llm-provider=openai llm-model=gpt-4o-mini \
-  env-secret=secret:<id-returned-above>
+  env-secret=secret:<id>
 ```
 
-Keyless provider, using an Ollama running in the cluster:
+Secret keys become Hindsight environment variables: `llm-api-key` becomes `HINDSIGHT_API_LLM_API_KEY`, and so on. Setting `tenant-api-key` turns on API-key authentication, and `hindsight-cp-access-key` protects the Control Plane. Use `extra-env` for any other non-secret setting.
 
-```bash
-juju config hindsight llm-provider=ollama llm-model=gemma3:12b \
-  llm-base-url=http://ollama.ollama.svc.cluster.local:11434/v1
+## Relations / Integrations
+
+### Database
+
+To scale beyond one unit, relate to PostgreSQL. Hindsight needs pgvector, which must be enabled on the PostgreSQL charm:
+
+```shell
+juju deploy postgresql-k8s --channel 14/stable --trust \
+  --config plugin_vector_enable=true    # 16 track: plugin-vector-enable=true
+juju config hindsight allow-embedded-database=false
+juju integrate hindsight postgresql-k8s
+juju add-unit hindsight -n 2
 ```
 
-Any other Hindsight setting can be set with `extra-env` (non-secret
-`KEY=VALUE` lines) or as a key in `env-secret`.
+For a PostgreSQL that Juju doesn't manage, set `database-url=postgresql://...` in `env-secret` instead.
 
-### Secret key mapping
+If the relation is later removed, the charm blocks rather than switching to an empty embedded database. Relate again, or run `juju run hindsight/0 use-embedded-database` to start over on the embedded database.
 
-Secret keys are upper-cased and dashes become underscores. Keys that don't
-already start with `hindsight-` also get the `HINDSIGHT_API_` prefix.
+### Ingress
 
-| Secret key                | Becomes                          | Effect                                                     |
-| ------------------------- | -------------------------------- | ---------------------------------------------------------- |
-| `llm-api-key`             | `HINDSIGHT_API_LLM_API_KEY`      | Provider API key                                           |
-| `tenant-api-key`          | `HINDSIGHT_API_TENANT_API_KEY`   | Turns on API-key auth (`Authorization: Bearer …`); the Control Plane gets the key automatically |
-| `hindsight-cp-access-key` | `HINDSIGHT_CP_ACCESS_KEY`        | Puts the Control Plane UI behind an access key             |
-| `database-url`            | `HINDSIGHT_API_DATABASE_URL`     | External DB that Juju doesn't manage                       |
+To expose the API, for example through Traefik:
 
-> **Security:** without `tenant-api-key`, the API accepts unauthenticated
-> requests from anything that can reach the Service. Set a tenant key before
-> exposing the API through ingress.
+```shell
+juju integrate hindsight traefik-k8s
+```
 
-## Reaching the services
+The Control Plane cannot be served under a path prefix. Reach it with `kubectl port-forward svc/hindsight 9999 -n <model>`.
 
-- **API:** relate to an ingress provider such as `traefik-k8s`
-  (`juju integrate hindsight traefik-k8s`). The API is served with the path
-  prefix stripped.
-- **Control Plane:** a Next.js app whose base path is fixed when the image is
-  built, so it doesn't work behind path-prefix ingress. Use
-  `kubectl port-forward svc/hindsight 9999 -n <model>`, or a dedicated host.
+## Security
 
-## Actions
+Without `tenant-api-key`, the API accepts unauthenticated requests from anything that can reach it. Set a tenant key before exposing the API.
 
-| Action                  | Purpose                                                              |
-| ----------------------- | -------------------------------------------------------------------- |
-| `use-embedded-database` | Opt back into pg0 after the `database` relation was removed          |
+## Contributing
 
-## Relations
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build and test the charm.
 
-| Endpoint   | Interface           | Purpose                                          |
-| ---------- | ------------------- | ------------------------------------------------ |
-| `database` | `postgresql_client` | External PostgreSQL (needs pgvector)             |
-| `ingress`  | `ingress`           | Exposes the API (:8888) through e.g. traefik-k8s |
+## License
 
-## Development
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+The Hindsight Operator is free software, distributed under the Apache Software License, version 2.0. See [LICENSE](LICENSE) for more information. Hindsight itself is Apache-2.0 licensed by Vectorize.
