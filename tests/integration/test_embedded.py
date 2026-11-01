@@ -99,9 +99,12 @@ def test_scaling_embedded_database_blocks_only_new_units(juju: jubilant.Juju):
 
     def settled(status: jubilant.Status) -> bool:
         units = status.apps[APP].units
+        # Unit 0 gets no hook when the app scales, so its note appears on
+        # the next update-status (every minute in these test models).
         return (
             len(units) == 2
             and units[UNIT].workload_status.current == "active"
+            and units[UNIT].workload_status.message == "embedded database; other units blocked"
             and units[f"{APP}/1"].workload_status.current == "blocked"
         )
 
