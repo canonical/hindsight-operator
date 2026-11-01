@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Charm
+*.charm
+.claude/settings.local.json
+# Vendored charm libraries (the Python template above ignores lib/)
+!lib/

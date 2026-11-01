@@ -1,0 +1,136 @@
+# Copyright 2026 Matias Piipari
+# See LICENSE file for licensing details.
+"""Pure functions that turn charm config, secrets and relation data into
+the environment for the Hindsight API and Control Plane services.
+
+Nothing in here touches the Juju model or the workload container, so it is
+straightforward to unit test.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from urllib.parse import quote
+
+from defaults import API_KEY_TENANT_EXTENSION, API_PORT, CONTROL_PLANE_PORT
+
+TENANT_API_KEY = "HINDSIGHT_API_TENANT_API_KEY"
+TENANT_EXTENSION = "HINDSIGHT_API_TENANT_EXTENSION"
+CP_ACCESS_KEY = "HINDSIGHT_CP_ACCESS_KEY"
+DATABASE_URL = "HINDSIGHT_API_DATABASE_URL"
+
+
+@dataclass(frozen=True)
+class DatabaseCredentials:
+    """Connection details for an external PostgreSQL database."""
+
+    username: str
+    password: str
+    endpoints: str
+    database: str
+
+    def url(self) -> str:
+        """Return a ``postgresql://`` URL for the first (primary) endpoint."""
+        host = self.endpoints.split(",")[0].strip()
+        user = quote(self.username, safe="")
+        password = quote(self.password, safe="")
+        return f"postgresql://{user}:{password}@{host}/{self.database}"
+
+
+def normalise_secret_key(key: str) -> str:
+    """Map a Juju secret key to the env var Hindsight expects.
+
+    Juju secret keys are lower-case with dashes. Keys already scoped to
+    Hindsight are kept as-is; anything else is treated as an API setting::
+
+        llm-api-key             -> HINDSIGHT_API_LLM_API_KEY
+        tenant-api-key          -> HINDSIGHT_API_TENANT_API_KEY
+        hindsight-cp-access-key -> HINDSIGHT_CP_ACCESS_KEY
+    """
+    name = key.strip().upper().replace("-", "_")
+    if name.startswith("HINDSIGHT_"):
+        return name
+    return f"HINDSIGHT_API_{name}"
+
+
+def parse_extra_env(raw: str) -> dict[str, str]:
+    """Parse newline-separated ``KEY=VALUE`` pairs, ignoring blanks and comments."""
+    env: dict[str, str] = {}
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip():
+            env[key.strip()] = value.strip()
+    return env
+
+
+def api_environment(
+    *,
+    llm_provider: str,
+    llm_model: str,
+    llm_base_url: str,
+    log_level: str,
+    worker_id: str,
+    extra_env: str,
+    secret_content: Mapping[str, str],
+    database: DatabaseCredentials | None,
+) -> dict[str, str]:
+    """Build the environment for the ``hindsight-api`` service.
+
+    Precedence (lowest to highest): charm defaults and typed options,
+    ``extra-env``, ``env-secret`` content, then charm-owned settings that must
+    not be overridden (bind address/port and the database URL).
+    """
+    env: dict[str, str] = {
+        "HINDSIGHT_API_LLM_PROVIDER": llm_provider,
+        "HINDSIGHT_API_LLM_MODEL": llm_model,
+        "HINDSIGHT_API_LOG_LEVEL": log_level,
+        "HINDSIGHT_API_WORKER_ID": worker_id,
+    }
+    if llm_base_url:
+        env["HINDSIGHT_API_LLM_BASE_URL"] = llm_base_url
+
+    env.update(parse_extra_env(extra_env))
+    env.update({normalise_secret_key(k): v for k, v in (secret_content or {}).items()})
+
+    # API-key auth: supplying a tenant key switches on the built-in extension
+    # unless the operator chose a different extension explicitly.
+    if env.get(TENANT_API_KEY):
+        env.setdefault(TENANT_EXTENSION, API_KEY_TENANT_EXTENSION)
+
+    # Control Plane settings are not meant for the API process.
+    env = {k: v for k, v in env.items() if not k.startswith("HINDSIGHT_CP_")}
+
+    env["HINDSIGHT_API_HOST"] = "0.0.0.0"
+    env["HINDSIGHT_API_PORT"] = str(API_PORT)
+    if database is not None:
+        # The relation always wins over a manually supplied URL.
+        env[DATABASE_URL] = database.url()
+    elif not env.get(DATABASE_URL):
+        # No URL at all means Hindsight's embedded pg0 (the upstream default).
+        env.pop(DATABASE_URL, None)
+    return env
+
+
+def uses_embedded_database(api_env: Mapping[str, str]) -> bool:
+    """Whether the API will fall back to its embedded pg0 database."""
+    url = api_env.get(DATABASE_URL, "")
+    return not url or url.startswith("pg0")
+
+
+def control_plane_environment(api_env: Mapping[str, str], secret_content: Mapping[str, str]):
+    """Build the environment for the ``hindsight-control-plane`` service."""
+    secrets = {normalise_secret_key(k): v for k, v in (secret_content or {}).items()}
+    env = {
+        "NODE_ENV": "production",
+        "HOSTNAME": "0.0.0.0",
+        "PORT": str(CONTROL_PLANE_PORT),
+        "HINDSIGHT_CP_DATAPLANE_API_URL": f"http://localhost:{API_PORT}",
+    }
+    env.update({k: v for k, v in secrets.items() if k.startswith("HINDSIGHT_CP_")})
+    if api_env.get(TENANT_API_KEY):
+        env["HINDSIGHT_CP_DATAPLANE_API_KEY"] = api_env[TENANT_API_KEY]
+    return env

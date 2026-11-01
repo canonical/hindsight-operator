@@ -1,0 +1,161 @@
+name: hindsight
+type: charm
+title: Hindsight
+summary: Hindsight agent-memory API server and Control Plane, as a Kubernetes charm.
+
+description: |
+  Hindsight is an agent-memory system from Vectorize that retains, recalls,
+  and reflects on world facts, experiences, and mental models.
+
+  This Kubernetes charm runs the Hindsight API server (REST, port 8888) and
+  the Hindsight Control Plane web UI (port 9999) as two Pebble services in a
+  single workload container.
+
+  Memory is stored either in an external PostgreSQL database provided over
+  the `database` relation (recommended; e.g. postgresql-k8s with the pgvector
+  plugin enabled), or — when no database is related — in Hindsight's embedded
+  PostgreSQL (pg0) persisted on a Juju storage volume, mirroring the
+  behaviour of the Hindsight Workshop SDK.
+
+  By default Hindsight runs without its own LLM (`llm-provider=none`): retain
+  and recall work, while LLM-only operations such as reflect are disabled.
+  Provider API keys are supplied through a Juju user secret, so credentials
+  never appear in plaintext `juju config` output.
+
+  Hindsight is licensed Apache-2.0 by Vectorize. This charm is an independent
+  packaging effort, also licensed Apache-2.0.
+
+links:
+  source:
+    - https://github.com/vectorize-io/hindsight
+  website:
+    - https://hindsight.vectorize.io/
+  issues:
+    - https://github.com/vectorize-io/hindsight/issues
+
+base: ubuntu@24.04
+platforms:
+  amd64:
+  arm64:
+
+assumes:
+  - k8s-api
+  # Secret-typed config options (env-secret) require Juju 3.3+.
+  - juju >= 3.3
+
+parts:
+  charm:
+    plugin: uv
+    source: .
+    build-snaps:
+      - astral-uv
+
+charm-libs:
+  - lib: data_platform_libs.data_interfaces
+    version: "0"
+  - lib: traefik_k8s.ingress
+    version: "2"
+
+containers:
+  hindsight:
+    resource: hindsight-image
+    mounts:
+      - storage: data
+        # Embedded pg0 data directory of the upstream image's `hindsight` user.
+        location: /home/hindsight/.pg0
+
+resources:
+  hindsight-image:
+    type: oci-image
+    description: >
+      OCI image providing the Hindsight API (/app/api/.venv) and Control Plane
+      (/app/control-plane). Defaults to the upstream standalone image.
+    upstream-source: ghcr.io/vectorize-io/hindsight:0.9.2
+
+storage:
+  data:
+    type: filesystem
+    description: >
+      Persistent data for the embedded PostgreSQL (pg0). Unused when an
+      external database is related over the `database` endpoint.
+    minimum-size: 1G
+
+requires:
+  database:
+    interface: postgresql_client
+    limit: 1
+    optional: true
+  ingress:
+    interface: ingress
+    limit: 1
+    optional: true
+
+config:
+  options:
+    llm-provider:
+      type: string
+      default: "none"
+      description: >
+        Hindsight LLM provider (HINDSIGHT_API_LLM_PROVIDER), e.g. none, openai,
+        anthropic, gemini, groq, ollama, lmstudio. With `none`, retain and
+        recall work but LLM-only operations (reflect, mental-model refresh)
+        are disabled — the right mode when a client such as Hermes owns the
+        conversational LLM. Put the provider API key in `env-secret` as
+        `llm-api-key`.
+    llm-model:
+      type: string
+      default: "none"
+      description: Model name passed to the provider (HINDSIGHT_API_LLM_MODEL).
+    llm-base-url:
+      type: string
+      default: ""
+      description: >
+        Optional provider base URL (HINDSIGHT_API_LLM_BASE_URL). Use this for
+        a keyless in-cluster or host-side model server, e.g.
+        `http://ollama.ollama.svc.cluster.local:11434/v1`.
+    log-level:
+      type: string
+      default: "info"
+      description: API log level (HINDSIGHT_API_LOG_LEVEL), e.g. debug, info, warning.
+    control-plane-enabled:
+      type: boolean
+      default: true
+      description: Run the Hindsight Control Plane web UI on port 9999.
+    allow-embedded-database:
+      type: boolean
+      default: true
+      description: >
+        When no `database` relation exists, run Hindsight's embedded
+        PostgreSQL (pg0) on the `data` storage volume. Embedded mode supports
+        a single unit only. Set to false to require an external database.
+        Note: data is not migrated between embedded and external databases.
+    extra-env:
+      type: string
+      default: ""
+      description: >
+        Additional non-secret environment for the API, as newline-separated
+        KEY=VALUE pairs (e.g. HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai).
+        Use `env-secret` for anything sensitive.
+    env-secret:
+      type: secret
+      description: >
+        A Juju user secret whose key/value content is merged into the
+        Hindsight environment. Keys are upper-cased, dashes become
+        underscores, and keys not already starting with `hindsight-` are
+        prefixed with `HINDSIGHT_API_` — so `llm-api-key` becomes
+        HINDSIGHT_API_LLM_API_KEY. Special keys: `tenant-api-key` enables
+        API-key authentication on the API (the Control Plane is given the key
+        automatically); `hindsight-cp-access-key` protects the Control Plane
+        UI with an access key. Create with
+        `juju add-secret hindsight-keys llm-api-key=sk-...`, then
+        `juju grant-secret hindsight-keys hindsight` and set this option to
+        the returned secret URI.
+
+actions:
+  use-embedded-database:
+    description: >
+      Switch this unit to the embedded database (pg0) after its `database`
+      relation was removed. The charm refuses to do this on its own, because
+      the embedded database does not have the memories stored in the external
+      database. Run it only if you accept starting from the pg0 volume's
+      contents, which may be empty.

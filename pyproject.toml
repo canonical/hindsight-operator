@@ -1,0 +1,41 @@
+[project]
+name = "hindsight-k8s-charm"
+version = "0.1.0"
+requires-python = ">=3.12"
+description = "Kubernetes charm for Hindsight, the agent-memory server from Vectorize"
+dependencies = [
+    "ops ~= 3.0",
+    # Required by the vendored charms.traefik_k8s.v2.ingress library.
+    "pydantic ~= 2.0",
+]
+
+[dependency-groups]
+lint = [
+    "ruff",
+]
+unit = [
+    "pytest",
+    "ops[testing] ~= 3.0",
+]
+integration = [
+    "pytest",
+    "jubilant ~= 1.0",
+    "pyyaml",
+]
+
+[tool.ruff]
+line-length = 99
+target-version = "py312"
+extend-exclude = ["lib"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["charm", "conftest", "defaults", "helpers", "hindsight_env", "workload"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "lib"]
+markers = [
+    "slow: integration tests that deploy postgresql-k8s",
+]
