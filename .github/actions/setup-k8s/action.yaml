@@ -1,0 +1,18 @@
+name: Set up Juju on MicroK8s
+description: Bootstrap a throwaway Juju controller on this runner, named concierge-microk8s.
+runs:
+  using: composite
+  steps:
+    - name: Free disk space for the Hindsight image
+      shell: bash
+      run: |
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h /
+    - name: Bootstrap
+      shell: bash
+      run: |
+        # Docker on the runner otherwise drops pod traffic.
+        sudo iptables -P FORWARD ACCEPT
+        sudo snap install concierge --classic
+        sudo concierge prepare -p microk8s --extra-snaps astral-uv
+        juju controllers

@@ -50,6 +50,21 @@ override), `KEEP_MODELS=1` (keep models for debugging).
 `test_postgresql.py` deploys `postgresql-k8s` with pgvector and checks that
 memory is shared across units.
 
+`test_published.py` deploys a Charmhub release instead of a packed charm. It
+is skipped unless `CHARM_CHANNEL` is set; `EXPECTED_CHARM_REVISION` optionally
+pins the revision.
+
+## Publishing
+
+CI does this. Pull requests lint, unit test, build and run `test_embedded.py`
+on native amd64 and arm64 runners. Pushes to `main` then also upload both charms
+and the image named by `upstream-source`, release them to `latest/edge`, and
+run `test_published.py` against that release on both architectures.
+
+Publishing uses the `CHARMHUB_TOKEN` repository secret, created with
+`charmcraft login --export` and limited to this charm. Release to other channels
+by hand with `charmcraft release`.
+
 ## Conventions
 
 - Runtime deps go in `pyproject.toml` and are locked in `uv.lock`
