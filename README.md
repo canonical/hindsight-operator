@@ -25,9 +25,7 @@ juju add-model hindsight
 To deploy a single unit with the embedded database:
 
 ```shell
-charmcraft pack
-juju deploy ./hindsight_amd64.charm hindsight \
-  --resource hindsight-image=ghcr.io/vectorize-io/hindsight:0.9.2
+juju deploy hindsight --channel latest/edge
 ```
 
 The embedded database lives on the `data` storage volume and supports one unit. Data is not migrated between the embedded and an external database.

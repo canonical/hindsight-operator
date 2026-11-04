@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CHANNEL: latest/edge
+
+jobs:
+  lint-unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo snap install astral-uv --classic
+      - run: uvx --with tox-uv tox -e lint,unit
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: canonical/setup-lxd@8c6a87bfb56aa48f3fb9b830baa18562d8bfd4ee # v1
+      - run: sudo snap install charmcraft --classic --channel 4.x/stable
+      - run: charmcraft pack -v
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: charm-${{ matrix.arch }}
+          path: hindsight_${{ matrix.arch }}.charm
+          if-no-files-found: error
+          retention-days: 7
+
+  integration:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: charm-${{ matrix.arch }}
+      - uses: ./.github/actions/setup-k8s
+      - name: Test the packed charm
+        env:
+          JUJU_CONTROLLER: concierge-microk8s
+          CHARM_PATH: hindsight_${{ matrix.arch }}.charm
+        run: uv run --group integration pytest tests/integration/test_embedded.py -v -x --tb=short
+
+  publish:
+    needs: [lint-unit, integration]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    concurrency:
+      group: publish
+    outputs:
+      amd64-revision: ${{ steps.publish.outputs.amd64-revision }}
+      arm64-revision: ${{ steps.publish.outputs.arm64-revision }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: charms
+          pattern: charm-*
+          merge-multiple: true
+      - run: sudo snap install charmcraft --classic --channel 4.x/stable
+      - name: Upload the charms and image, and release them
+        id: publish
+        env:
+          CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Charmhub only accepts a resource declared by an uploaded revision,
+          # so the charms go first. The image is multi-arch: one resource
+          # revision serves both.
+          for arch in amd64 arm64; do
+            revision=$(charmcraft upload "charms/hindsight_${arch}.charm" --format json | jq -er .revision)
+            echo "${arch}-revision=${revision}" >> "$GITHUB_OUTPUT"
+            declare "revision_${arch}=${revision}"
+          done
+          image=$(sed -n 's/^ *upstream-source: *//p' charmcraft.yaml)
+          resource=$(charmcraft upload-resource hindsight hindsight-image \
+            --image="docker://${image}" --format json | jq -er .revision)
+          for revision in "$revision_amd64" "$revision_arm64"; do
+            charmcraft release hindsight --revision="$revision" --channel="$CHANNEL" \
+              --resource="hindsight-image:${resource}"
+          done
+          charmcraft status hindsight
+
+  verify-published:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-k8s
+      - name: Deploy the release from Charmhub
+        env:
+          JUJU_CONTROLLER: concierge-microk8s
+          CHARM_CHANNEL: ${{ env.CHANNEL }}
+          EXPECTED_CHARM_REVISION: ${{ needs.publish.outputs[format('{0}-revision', matrix.arch)] }}
+        run: uv run --group integration pytest tests/integration/test_published.py -v -x --tb=short
