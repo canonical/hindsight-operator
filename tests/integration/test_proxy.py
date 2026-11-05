@@ -50,10 +50,11 @@ def deployed(juju: jubilant.Juju, charm, resources):
         unit=UNIT,
     )
     juju.cli("model-config", f"juju-https-proxy=http://127.0.0.1:{PROXY_PORT}")
-    # Any hook applies it, and update-status runs every minute in these tests.
+    # Juju fires no hook for this: update-status, every minute here, must apply it.
     juju.wait(
         lambda _: api_environment(juju, UNIT).get("HTTPS_PROXY", "").endswith(f":{PROXY_PORT}"),
         delay=10,
+        timeout=5 * 60,
     )
     wait_active(juju)
 

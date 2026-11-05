@@ -111,11 +111,27 @@ class HindsightCharm(ops.CharmBase):
         # and with it collect-status, without waiting for update-status.
         framework.observe(self.on[CONTAINER].pebble_check_failed, self._on_check_event)
         framework.observe(self.on[CONTAINER].pebble_check_recovered, self._on_check_event)
+        framework.observe(self.on.update_status, self._on_update_status)
         framework.observe(self.on.collect_unit_status, self._on_collect_unit_status)
         framework.observe(self.on.use_embedded_database_action, self._on_use_embedded_database)
 
     def _on_check_event(self, event: ops.EventBase) -> None:
         logger.debug("Pebble check event: %s", event)
+
+    def _on_update_status(self, event: ops.EventBase) -> None:
+        """Pick up a changed model proxy, which Juju fires no hook for.
+
+        Only then: a full reconcile stops the services on any error, which is
+        too much to risk every few minutes on a healthy unit.
+        """
+        if not self.container.can_connect():
+            return
+        api = self.container.get_plan().services.get(API_SERVICE)
+        if api is None:
+            return
+        wanted = hindsight_env.proxy_environment(os.environ)
+        if hindsight_env.planned_proxy(api.environment) != wanted:
+            self._reconcile(event)
 
     def _on_use_embedded_database(self, event: ops.ActionEvent) -> None:
         if self.model.relations[DATABASE_RELATION]:

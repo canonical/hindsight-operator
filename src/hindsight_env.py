@@ -19,6 +19,7 @@ TENANT_API_KEY = "HINDSIGHT_API_TENANT_API_KEY"
 TENANT_EXTENSION = "HINDSIGHT_API_TENANT_EXTENSION"
 CP_ACCESS_KEY = "HINDSIGHT_CP_ACCESS_KEY"
 DATABASE_URL = "HINDSIGHT_API_DATABASE_URL"
+PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,11 @@ def parse_extra_env(raw: str) -> dict[str, str]:
     return env
 
 
+def planned_proxy(env: Mapping[str, str]) -> dict[str, str]:
+    """The proxy variables, in either spelling, of a service environment."""
+    return {k: v for k, v in env.items() if k.upper() in PROXY_VARS}
+
+
 def proxy_environment(charm_env: Mapping[str, str]) -> dict[str, str]:
     """Translate the model's Juju proxy settings for the workload.
 
@@ -74,7 +80,7 @@ def proxy_environment(charm_env: Mapping[str, str]) -> dict[str, str]:
     clients disagree on which one they read.
     """
     env: dict[str, str] = {}
-    for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+    for name in PROXY_VARS:
         if value := charm_env.get(f"JUJU_CHARM_{name}"):
             env[name] = value
             env[name.lower()] = value

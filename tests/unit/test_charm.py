@@ -102,6 +102,36 @@ def test_model_proxy_reaches_the_api_only(ctx, pg0_mount, monkeypatch):
     assert "HTTPS_PROXY" not in services[CONTROL_PLANE_SERVICE].environment
 
 
+def test_update_status_applies_a_changed_model_proxy(ctx, pg0_mount, monkeypatch):
+    container = _container(pg0_mount)
+    state = testing.State(containers={container}, leader=True)
+    state = ctx.run(ctx.on.pebble_ready(container), state)
+    assert "HTTPS_PROXY" not in _api_env(state)
+
+    monkeypatch.setenv("JUJU_CHARM_HTTPS_PROXY", "http://egress:3128")
+    state = ctx.run(ctx.on.update_status(), state)
+    assert _api_env(state)["HTTPS_PROXY"] == "http://egress:3128"
+
+    monkeypatch.delenv("JUJU_CHARM_HTTPS_PROXY")
+    state = ctx.run(ctx.on.update_status(), state)
+    assert "HTTPS_PROXY" not in _api_env(state)
+    assert "https_proxy" not in _api_env(state)
+
+
+def test_update_status_leaves_services_alone_when_proxy_is_unchanged(ctx, pg0_mount, monkeypatch):
+    monkeypatch.setenv("JUJU_CHARM_HTTPS_PROXY", "http://egress:3128")
+    container = _container(pg0_mount)
+    state = testing.State(containers={container}, leader=True)
+    state = ctx.run(ctx.on.pebble_ready(container), state)
+
+    calls = []
+    monkeypatch.setattr(
+        charm_module.HindsightCharm, "_reconcile", lambda self, event: calls.append(event)
+    )
+    ctx.run(ctx.on.update_status(), state)
+    assert calls == []
+
+
 def test_embedded_mode_plans_both_services(ctx, pg0_mount):
     container = _container(pg0_mount)
     state = testing.State(containers={container}, leader=True)
