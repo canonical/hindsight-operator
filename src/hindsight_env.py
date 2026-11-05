@@ -20,6 +20,13 @@ TENANT_EXTENSION = "HINDSIGHT_API_TENANT_EXTENSION"
 CP_ACCESS_KEY = "HINDSIGHT_CP_ACCESS_KEY"
 DATABASE_URL = "HINDSIGHT_API_DATABASE_URL"
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+# The image bundles its embedding and reranker models and LiteLLM's price map.
+# Without these, startup calls huggingface.co, and a proxy's refusal is fatal.
+OFFLINE_ENV = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+}
 
 
 @dataclass(frozen=True)
@@ -109,6 +116,7 @@ def api_environment(
     value.
     """
     env: dict[str, str] = {
+        **OFFLINE_ENV,
         "HINDSIGHT_API_LLM_PROVIDER": llm_provider,
         "HINDSIGHT_API_LLM_MODEL": llm_model,
         "HINDSIGHT_API_LOG_LEVEL": log_level,

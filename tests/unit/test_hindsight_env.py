@@ -158,3 +158,8 @@ def test_extra_env_replaces_both_spellings_of_a_model_proxy():
     assert env["HTTPS_PROXY"] == "http://operator"
     assert "https_proxy" not in env
     assert env["NO_PROXY"] == "model"
+
+
+def test_bundled_models_are_used_offline_unless_overridden():
+    assert _api_env()["HF_HUB_OFFLINE"] == "1"
+    assert _api_env(extra_env="HF_HUB_OFFLINE=0")["HF_HUB_OFFLINE"] == "0"

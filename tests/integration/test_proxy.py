@@ -65,6 +65,10 @@ def test_model_proxy_reaches_the_api_and_keeps_local_traffic_direct(juju: jubila
     assert "localhost" in env["NO_PROXY"]
     response = http(juju, UNIT, "GET", "/health")
     assert response.status == 200, response.body
+    # The image bundles these: startup mustn't need them through a proxy.
+    log = _proxy_log(juju)
+    assert "huggingface.co" not in log, log
+    assert "raw.githubusercontent.com" not in log, log
 
 
 @pytest.mark.parametrize(
