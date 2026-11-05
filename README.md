@@ -57,6 +57,8 @@ juju integrate hindsight postgresql-k8s
 juju add-unit hindsight -n 2
 ```
 
+With pgvector older than 0.8.0, also set `ann-iterative-scan=false`. Hindsight otherwise logs a warning and drops the setting, and filtered searches can return fewer results either way.
+
 For a PostgreSQL that Juju doesn't manage, set `database-url=postgresql://...` in `env-secret` instead.
 
 If the relation is later removed, the charm blocks rather than switching to an empty embedded database. Relate again, or run `juju run hindsight/0 use-embedded-database` to start over on the embedded database.
