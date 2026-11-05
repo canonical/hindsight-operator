@@ -1,0 +1,25 @@
+# Only what the integration tests use: Juju on MicroK8s, plus uv to run them.
+# The microk8s preset also installs LXD, charmcraft, rockcraft and other build
+# tools; the charm is packed in a separate job, so none of them are needed here.
+# rockcraft's configure hook in particular has repeatedly hit snapd's 5-minute
+# limit on GitHub runners and failed the whole job.
+juju:
+  # From the preset: a slow runner can take longer than the default 20 minutes.
+  extra-bootstrap-args: --config bootstrap-timeout=1800
+  model-defaults:
+    test-mode: "true"
+    automatically-retry-hooks: "false"
+
+providers:
+  microk8s:
+    enable: true
+    bootstrap: true
+    addons:
+      - hostpath-storage
+      - dns
+      - rbac
+      - metallb:10.64.140.43-10.64.140.49
+
+host:
+  snaps:
+    astral-uv:
