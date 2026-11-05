@@ -14,5 +14,5 @@ runs:
         # Docker on the runner otherwise drops pod traffic.
         sudo iptables -P FORWARD ACCEPT
         sudo snap install concierge --classic
-        sudo concierge prepare -p microk8s --extra-snaps astral-uv
+        sudo concierge prepare -c "$GITHUB_ACTION_PATH/concierge.yaml"
         juju controllers

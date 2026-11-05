@@ -34,9 +34,9 @@ controller:
 charmcraft pack
 lxc launch ubuntu:24.04 hindsight-it --vm \
   -c limits.cpu=8 -c limits.memory=24GiB -d root,size=80GiB
-lxc exec hindsight-it -- bash -c \
-  'snap install concierge --classic && concierge prepare -p microk8s --extra-snaps astral-uv'
 lxc file push -r . hindsight-it/root/hindsight-operator
+lxc exec hindsight-it -- bash -c \
+  'snap install concierge --classic && concierge prepare -c /root/hindsight-operator/.github/actions/setup-k8s/concierge.yaml'
 lxc exec hindsight-it --cwd /root/hindsight-operator -- env \
   JUJU_CONTROLLER=concierge-microk8s \
   uv run --group integration pytest tests/integration -v -x
