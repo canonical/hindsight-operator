@@ -22,6 +22,7 @@ unit has used the external database, and whether preparing pg0 failed.
 from __future__ import annotations
 
 import logging
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -169,6 +170,7 @@ class HindsightCharm(ops.CharmBase):
             extra_env=str(self.config["extra-env"]),
             secret_content=secret_content,
             database=database,
+            proxy_env=hindsight_env.proxy_environment(os.environ),
         )
 
         embedded = hindsight_env.uses_embedded_database(api_env)

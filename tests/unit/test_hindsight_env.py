@@ -133,3 +133,28 @@ def test_control_plane_keys_stay_out_of_the_api():
     assert cp["PORT"] == "9999"
     assert "HINDSIGHT_CP_DATAPLANE_API_KEY" not in cp
     assert "HINDSIGHT_API_LLM_API_KEY" not in cp
+
+
+def test_proxy_environment_sets_both_spellings_and_skips_unset():
+    env = hindsight_env.proxy_environment(
+        {
+            "JUJU_CHARM_HTTPS_PROXY": "http://proxy:3128",
+            "JUJU_CHARM_NO_PROXY": "localhost",
+            "JUJU_CHARM_HTTP_PROXY": "",
+            "PATH": "/bin",
+        }
+    )
+    assert env == {
+        "HTTPS_PROXY": "http://proxy:3128",
+        "https_proxy": "http://proxy:3128",
+        "NO_PROXY": "localhost",
+        "no_proxy": "localhost",
+    }
+
+
+def test_extra_env_replaces_both_spellings_of_a_model_proxy():
+    proxy = {"HTTPS_PROXY": "http://model", "https_proxy": "http://model", "NO_PROXY": "model"}
+    env = _api_env(proxy_env=proxy, extra_env="HTTPS_PROXY=http://operator")
+    assert env["HTTPS_PROXY"] == "http://operator"
+    assert "https_proxy" not in env
+    assert env["NO_PROXY"] == "model"

@@ -86,6 +86,22 @@ def test_pebble_not_ready_waits(ctx, pg0_mount):
     assert out.unit_status == WaitingStatus("waiting for Pebble in workload container")
 
 
+def test_model_proxy_reaches_the_api_only(ctx, pg0_mount, monkeypatch):
+    monkeypatch.setenv("JUJU_CHARM_HTTPS_PROXY", "http://egress:3128")
+    monkeypatch.setenv("JUJU_CHARM_NO_PROXY", "localhost,.svc")
+    container = _container(pg0_mount)
+    state = testing.State(containers={container}, leader=True)
+
+    out = ctx.run(ctx.on.pebble_ready(container), state)
+
+    services = out.get_container(CONTAINER).plan.services
+    api = services[API_SERVICE].environment
+    assert api["HTTPS_PROXY"] == api["https_proxy"] == "http://egress:3128"
+    assert api["NO_PROXY"] == api["no_proxy"] == "localhost,.svc"
+    # The Control Plane only talks to the API on localhost.
+    assert "HTTPS_PROXY" not in services[CONTROL_PLANE_SERVICE].environment
+
+
 def test_embedded_mode_plans_both_services(ctx, pg0_mount):
     container = _container(pg0_mount)
     state = testing.State(containers={container}, leader=True)

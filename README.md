@@ -41,7 +41,7 @@ juju config hindsight llm-provider=openai llm-model=gpt-4o-mini \
   env-secret=secret:<id>
 ```
 
-Secret keys become Hindsight environment variables: `llm-api-key` becomes `HINDSIGHT_API_LLM_API_KEY`, and so on. Setting `tenant-api-key` turns on API-key authentication, and `hindsight-cp-access-key` protects the Control Plane. Use `extra-env` for any other non-secret setting.
+If the model has a proxy (`juju-https-proxy`), the charm passes it to Hindsight, and the proxy must allow your provider's host. Secret keys become Hindsight environment variables: `llm-api-key` becomes `HINDSIGHT_API_LLM_API_KEY`, and so on. Setting `tenant-api-key` turns on API-key authentication, and `hindsight-cp-access-key` protects the Control Plane. Use `extra-env` for any other non-secret setting.
 
 ## Relations / Integrations
 
