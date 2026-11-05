@@ -59,12 +59,20 @@ def test_memory_survives_pod_restart(juju: jubilant.Juju):
 
 
 def test_config_reaches_pebble_plan(juju: jubilant.Juju):
-    juju.config(APP, {"llm-model": "it-model", "extra-env": "HINDSIGHT_API_LOG_FORMAT=json"})
+    juju.config(
+        APP,
+        {
+            "llm-model": "it-model",
+            "ann-iterative-scan": False,
+            "extra-env": "HINDSIGHT_API_LOG_FORMAT=json",
+        },
+    )
     wait_active(juju)
     env = api_environment(juju, UNIT)
     assert env["HINDSIGHT_API_LLM_MODEL"] == "it-model"
+    assert env["HINDSIGHT_API_ANN_ITERATIVE_SCAN"] == "false"
     assert env["HINDSIGHT_API_LOG_FORMAT"] == "json"
-    juju.config(APP, reset=["llm-model", "extra-env"])
+    juju.config(APP, reset=["llm-model", "ann-iterative-scan", "extra-env"])
     wait_active(juju)
 
 

@@ -118,6 +118,14 @@ config:
       type: string
       default: "info"
       description: API log level (HINDSIGHT_API_LOG_LEVEL), e.g. debug, info, warning.
+    ann-iterative-scan:
+      type: boolean
+      default: true
+      description: >
+        Let filtered vector searches keep scanning until they find enough
+        matches (HINDSIGHT_API_ANN_ITERATIVE_SCAN). Needs pgvector 0.8.0 or
+        later; set false for an older pgvector, such as 0.6.0. Without it,
+        filtered searches may return fewer results than asked for.
     control-plane-enabled:
       type: boolean
       default: true

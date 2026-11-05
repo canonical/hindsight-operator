@@ -51,6 +51,7 @@ def test_defaults_match_workshop_sdk():
     assert env["HINDSIGHT_API_WORKER_ID"] == "hindsight-0"
     assert env["HINDSIGHT_API_HOST"] == "0.0.0.0"
     assert env["HINDSIGHT_API_PORT"] == "8888"
+    assert env["HINDSIGHT_API_ANN_ITERATIVE_SCAN"] == "true"
     assert "HINDSIGHT_API_LLM_BASE_URL" not in env
     assert "HINDSIGHT_API_DATABASE_URL" not in env
     assert hindsight_env.uses_embedded_database(env)
@@ -163,3 +164,9 @@ def test_extra_env_replaces_both_spellings_of_a_model_proxy():
 def test_bundled_models_are_used_offline_unless_overridden():
     assert _api_env()["HF_HUB_OFFLINE"] == "1"
     assert _api_env(extra_env="HF_HUB_OFFLINE=0")["HF_HUB_OFFLINE"] == "0"
+
+
+def test_ann_iterative_scan_option_can_be_turned_off_and_overridden():
+    assert _api_env(ann_iterative_scan=False)["HINDSIGHT_API_ANN_ITERATIVE_SCAN"] == "false"
+    env = _api_env(ann_iterative_scan=False, extra_env="HINDSIGHT_API_ANN_ITERATIVE_SCAN=true")
+    assert env["HINDSIGHT_API_ANN_ITERATIVE_SCAN"] == "true"

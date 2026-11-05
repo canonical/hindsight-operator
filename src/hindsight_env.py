@@ -101,6 +101,7 @@ def api_environment(
     llm_base_url: str,
     log_level: str,
     worker_id: str,
+    ann_iterative_scan: bool = True,
     extra_env: str,
     secret_content: Mapping[str, str],
     database: DatabaseCredentials | None,
@@ -121,6 +122,7 @@ def api_environment(
         "HINDSIGHT_API_LLM_MODEL": llm_model,
         "HINDSIGHT_API_LOG_LEVEL": log_level,
         "HINDSIGHT_API_WORKER_ID": worker_id,
+        "HINDSIGHT_API_ANN_ITERATIVE_SCAN": "true" if ann_iterative_scan else "false",
     }
     if llm_base_url:
         env["HINDSIGHT_API_LLM_BASE_URL"] = llm_base_url

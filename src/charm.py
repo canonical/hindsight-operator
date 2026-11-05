@@ -182,6 +182,7 @@ class HindsightCharm(ops.CharmBase):
             llm_model=str(self.config["llm-model"]),
             llm_base_url=str(self.config["llm-base-url"]),
             log_level=str(self.config["log-level"]),
+            ann_iterative_scan=bool(self.config["ann-iterative-scan"]),
             worker_id=self.unit.name.replace("/", "-"),
             extra_env=str(self.config["extra-env"]),
             secret_content=secret_content,
