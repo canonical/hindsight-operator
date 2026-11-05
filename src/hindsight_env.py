@@ -19,6 +19,14 @@ TENANT_API_KEY = "HINDSIGHT_API_TENANT_API_KEY"
 TENANT_EXTENSION = "HINDSIGHT_API_TENANT_EXTENSION"
 CP_ACCESS_KEY = "HINDSIGHT_CP_ACCESS_KEY"
 DATABASE_URL = "HINDSIGHT_API_DATABASE_URL"
+PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+# The image bundles its embedding and reranker models and LiteLLM's price map.
+# Without these, startup calls huggingface.co, and a proxy's refusal is fatal.
+OFFLINE_ENV = {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+}
 
 
 @dataclass(frozen=True)
@@ -67,6 +75,25 @@ def parse_extra_env(raw: str) -> dict[str, str]:
     return env
 
 
+def planned_proxy(env: Mapping[str, str]) -> dict[str, str]:
+    """The proxy variables, in either spelling, of a service environment."""
+    return {k: v for k, v in env.items() if k.upper() in PROXY_VARS}
+
+
+def proxy_environment(charm_env: Mapping[str, str]) -> dict[str, str]:
+    """Translate the model's Juju proxy settings for the workload.
+
+    Juju only gives these to the charm. Both spellings are set because HTTP
+    clients disagree on which one they read.
+    """
+    env: dict[str, str] = {}
+    for name in PROXY_VARS:
+        if value := charm_env.get(f"JUJU_CHARM_{name}"):
+            env[name] = value
+            env[name.lower()] = value
+    return env
+
+
 def api_environment(
     *,
     llm_provider: str,
@@ -77,14 +104,19 @@ def api_environment(
     extra_env: str,
     secret_content: Mapping[str, str],
     database: DatabaseCredentials | None,
+    proxy_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the environment for the ``hindsight-api`` service.
 
-    Precedence (lowest to highest): charm defaults and typed options,
-    ``extra-env``, ``env-secret`` content, then charm-owned settings that must
-    not be overridden (bind address/port and the database URL).
+    Precedence (lowest to highest): charm defaults, typed options and the
+    model's proxy settings, ``extra-env``, ``env-secret`` content, then
+    charm-owned settings that must not be overridden (bind address/port and the
+    database URL). A proxy variable in ``extra-env`` replaces both spellings
+    from the model, so a client preferring the other one can't pick up a stale
+    value.
     """
     env: dict[str, str] = {
+        **OFFLINE_ENV,
         "HINDSIGHT_API_LLM_PROVIDER": llm_provider,
         "HINDSIGHT_API_LLM_MODEL": llm_model,
         "HINDSIGHT_API_LOG_LEVEL": log_level,
@@ -93,7 +125,10 @@ def api_environment(
     if llm_base_url:
         env["HINDSIGHT_API_LLM_BASE_URL"] = llm_base_url
 
-    env.update(parse_extra_env(extra_env))
+    extra = parse_extra_env(extra_env)
+    operator_set = {key.upper() for key in extra}
+    env.update({k: v for k, v in (proxy_env or {}).items() if k.upper() not in operator_set})
+    env.update(extra)
     env.update({normalise_secret_key(k): v for k, v in (secret_content or {}).items()})
 
     # API-key auth: supplying a tenant key switches on the built-in extension
