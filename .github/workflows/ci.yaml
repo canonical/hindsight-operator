@@ -89,8 +89,21 @@ jobs:
           # Charmhub only accepts a resource declared by an uploaded revision,
           # so the charms go first. The image is multi-arch: one resource
           # revision serves both.
+          # Re-running this job uploads the same files again. Charmhub refuses a
+          # duplicate but names the revision it already has, so use that one.
+          upload() {
+            local out err
+            err=$(mktemp)
+            if out=$(charmcraft upload "$1" --format json 2>"$err"); then
+              jq -er .revision <<<"$out"
+            elif grep -ohP 'Revision of the existing package is: \K[0-9]+' "$err" - <<<"$out"; then
+              echo "$1 is already uploaded; reusing that revision" >&2
+            else
+              cat "$err" >&2; echo "$out" >&2; return 1
+            fi
+          }
           for arch in amd64 arm64; do
-            revision=$(charmcraft upload "charms/hindsight_${arch}.charm" --format json | jq -er .revision)
+            revision=$(upload "charms/hindsight_${arch}.charm")
             echo "${arch}-revision=${revision}" >> "$GITHUB_OUTPUT"
             declare "revision_${arch}=${revision}"
           done
