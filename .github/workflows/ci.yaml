@@ -5,12 +5,17 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      charmhub-branch:
+        description: >
+          Publish this ref to the Charmhub branch latest/edge/<name>, e.g.
+          pr-9, to try it before merging. Lowercase letters, digits and dashes.
+          Leave empty to publish only from main, to latest/edge.
+        type: string
+        default: ""
 
 permissions:
   contents: read
-
-env:
-  CHANNEL: latest/edge
 
 jobs:
   lint-unit:
@@ -64,12 +69,17 @@ jobs:
 
   publish:
     needs: [lint-unit, integration]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # main publishes to latest/edge. Any ref can publish to a Charmhub branch
+    # on request; pull requests never publish, so forks can't reach the token.
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || inputs.charmhub-branch != '')
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     concurrency:
       group: publish
     outputs:
+      channel: ${{ steps.channel.outputs.channel }}
       amd64-revision: ${{ steps.publish.outputs.amd64-revision }}
       arm64-revision: ${{ steps.publish.outputs.arm64-revision }}
     steps:
@@ -80,10 +90,27 @@ jobs:
           pattern: charm-*
           merge-multiple: true
       - run: sudo snap install charmcraft --classic --channel 4.x/stable
+      - name: Choose the channel
+        id: channel
+        env:
+          BRANCH: ${{ inputs.charmhub-branch }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BRANCH" ]; then
+            channel=latest/edge
+          elif [[ "$BRANCH" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
+            channel="latest/edge/$BRANCH"
+          else
+            echo "::error::charmhub-branch must be lowercase letters, digits and dashes" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "Publishing to $channel" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the charms and image, and release them
         id: publish
         env:
           CHARMCRAFT_AUTH: ${{ secrets.CHARMHUB_TOKEN }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
           set -euo pipefail
           # Charmhub only accepts a resource declared by an uploaded revision,
@@ -132,6 +159,6 @@ jobs:
       - name: Deploy the release from Charmhub
         env:
           JUJU_CONTROLLER: concierge-microk8s
-          CHARM_CHANNEL: ${{ env.CHANNEL }}
+          CHARM_CHANNEL: ${{ needs.publish.outputs.channel }}
           EXPECTED_CHARM_REVISION: ${{ needs.publish.outputs[format('{0}-revision', matrix.arch)] }}
         run: uv run --group integration pytest tests/integration/test_published.py -v -x --tb=short

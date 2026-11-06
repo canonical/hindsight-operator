@@ -13,7 +13,7 @@ import os
 import jubilant
 import pytest
 
-from conftest import APP
+from conftest import APP, ARCH, METADATA
 from helpers import http, retain_and_recall, wait_active
 
 CHANNEL = os.environ.get("CHARM_CHANNEL", "")
@@ -26,7 +26,9 @@ pytestmark = pytest.mark.skipif(not CHANNEL, reason="CHARM_CHANNEL is not set")
 @pytest.fixture(scope="module", autouse=True)
 def deployed(juju: jubilant.Juju):
     # No resources are passed, so the image can only come from Charmhub.
-    juju.deploy(APP, channel=CHANNEL)
+    # Juju can't pick a release from a branch channel (track/risk/branch) by
+    # itself: it needs the base and architecture given explicitly.
+    juju.deploy(APP, channel=CHANNEL, base=METADATA["base"], constraints={"arch": ARCH})
     wait_active(juju)
 
 
