@@ -77,9 +77,12 @@ storage:
   data:
     type: filesystem
     description: >
-      Persistent data for the embedded PostgreSQL (pg0). Unused when an
-      external database is related over the `database` endpoint.
+      Persistent data for the embedded PostgreSQL (pg0). Only the embedded
+      database needs it: add it at deploy time with `--storage data=1G`.
+      With PostgreSQL related over the `database` endpoint, leave it out.
     minimum-size: 1G
+    multiple:
+      range: 0-1
 
 requires:
   database:
@@ -167,4 +170,5 @@ actions:
       relation was removed. The charm refuses to do this on its own, because
       the embedded database does not have the memories stored in the external
       database. Run it only if you accept starting from the pg0 volume's
-      contents, which may be empty.
+      contents, which may be empty. It needs the unit to have the `data`
+      volume (deployed with `--storage data=1G`), and refuses otherwise.

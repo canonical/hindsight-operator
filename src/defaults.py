@@ -42,3 +42,6 @@ INGRESS_RELATION = "ingress"
 API_KEY_TENANT_EXTENSION = "hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension"
 
 SERVICE_PATH = "/app/api/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# The volume holding the embedded database; optional with an external one.
+DATA_STORAGE = "data"

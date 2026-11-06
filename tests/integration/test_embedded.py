@@ -19,7 +19,7 @@ UNIT = f"{APP}/0"
 
 @pytest.fixture(scope="module", autouse=True)
 def deployed(juju: jubilant.Juju, charm, resources):
-    juju.deploy(charm, APP, resources=resources)
+    juju.deploy(charm, APP, resources=resources, storage={"data": "1G"})
     wait_active(juju)
 
 
