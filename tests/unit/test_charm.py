@@ -577,7 +577,7 @@ def test_control_plane_ingress_withheld_without_access_key(ctx, pg0_mount):
     out = ctx.run(ctx.on.relation_joined(relation), state)
 
     assert out.get_relation(relation.id).local_app_data == {}
-    assert "control plane not published" in out.unit_status.message
+    assert "control plane stopped" in out.unit_status.message
 
 
 def test_control_plane_ingress_withheld_when_control_plane_disabled(ctx, pg0_mount):
@@ -615,3 +615,61 @@ def test_api_ingress_is_unaffected_by_control_plane_gating(ctx, pg0_mount):
     out = ctx.run(ctx.on.relation_changed(relation), state)
 
     assert json.loads(out.get_relation(relation.id).local_app_data["port"]) == 8888
+
+
+def _cp_running_state(pg0_mount, secret_content, *, related):
+    secret = testing.Secret(tracked_content=secret_content)
+    relations = (
+        {testing.Relation("control-plane-ingress", remote_app_name="cp-ingress")}
+        if related
+        else set()
+    )
+    state = _state(
+        containers={_running_container(pg0_mount)},
+        secrets={secret},
+        relations=relations,
+        leader=True,
+        config={"env-secret": secret.id},
+    )
+    return state
+
+
+def test_control_plane_stopped_and_port_closed_with_ingress_but_no_key(ctx, pg0_mount):
+    state = _cp_running_state(pg0_mount, {"tenant-api-key": "hs-key"}, related=True)
+
+    out = ctx.run(ctx.on.config_changed(), state)
+
+    container = out.get_container(CONTAINER)
+    assert container.service_statuses[CONTROL_PLANE_SERVICE] == pebble.ServiceStatus.INACTIVE
+    cp = container.plan.services[CONTROL_PLANE_SERVICE]
+    assert cp.startup == "disabled"
+    # Even if Pebble restarts it, it demands a key nobody has.
+    lockout = cp.environment["HINDSIGHT_CP_ACCESS_KEY"]
+    assert len(lockout) >= 32
+    assert {p.port for p in out.opened_ports} == {8888}
+
+    again = ctx.run(ctx.on.config_changed(), out)
+    env = again.get_container(CONTAINER).plan.services[CONTROL_PLANE_SERVICE].environment
+    assert env["HINDSIGHT_CP_ACCESS_KEY"] == lockout
+
+
+def test_control_plane_runs_with_ingress_and_key(ctx, pg0_mount):
+    state = _cp_running_state(pg0_mount, {"hindsight-cp-access-key": "cp-key"}, related=True)
+
+    out = ctx.run(ctx.on.config_changed(), state)
+
+    container = out.get_container(CONTAINER)
+    assert container.service_statuses[CONTROL_PLANE_SERVICE] == pebble.ServiceStatus.ACTIVE
+    env = container.plan.services[CONTROL_PLANE_SERVICE].environment
+    assert env["HINDSIGHT_CP_ACCESS_KEY"] == "cp-key"
+    assert {p.port for p in out.opened_ports} == {8888, 9999}
+
+
+def test_control_plane_without_ingress_still_runs_without_key(ctx, pg0_mount):
+    state = _cp_running_state(pg0_mount, {"tenant-api-key": "hs-key"}, related=False)
+
+    out = ctx.run(ctx.on.config_changed(), state)
+
+    container = out.get_container(CONTAINER)
+    assert container.service_statuses[CONTROL_PLANE_SERVICE] == pebble.ServiceStatus.ACTIVE
+    assert "control plane stopped" not in out.unit_status.message
