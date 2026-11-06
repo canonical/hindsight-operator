@@ -528,3 +528,17 @@ def test_crash_looping_api_says_where_to_look(ctx, pg0_mount, api_up):
 
     assert out.unit_status.name == "waiting"
     assert "pebble logs hindsight-api" in out.unit_status.message
+
+
+def test_relation_removed_without_storage_does_not_suggest_the_action(ctx, pg0_mount):
+    container = _container(pg0_mount)
+    state = _state(
+        containers={container},
+        storages=set(),
+        leader=True,
+        stored_states={_stored(external_database_used=True)},
+    )
+
+    out = ctx.run(ctx.on.update_status(), state)
+
+    assert out.unit_status == BlockedStatus("database relation removed: relate postgresql again")
