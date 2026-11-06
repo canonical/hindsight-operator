@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(not CHANNEL, reason="CHARM_CHANNEL is not set")
 @pytest.fixture(scope="module", autouse=True)
 def deployed(juju: jubilant.Juju):
     # No resources are passed, so the image can only come from Charmhub.
-    juju.deploy(APP, channel=CHANNEL)
+    juju.deploy(APP, channel=CHANNEL, storage={"data": "1G"})
     wait_active(juju)
 
 

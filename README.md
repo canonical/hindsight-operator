@@ -25,10 +25,10 @@ juju add-model hindsight
 To deploy a single unit with the embedded database:
 
 ```shell
-juju deploy hindsight --channel latest/edge
+juju deploy hindsight --channel latest/edge --storage data=1G
 ```
 
-The embedded database lives on the `data` storage volume and supports one unit. Data is not migrated between the embedded and an external database.
+The embedded database lives on the `data` storage volume and supports one unit. Without `--storage data=1G` the charm blocks rather than keep memories on the container's own filesystem, which a pod restart would wipe. Data is not migrated between the embedded and an external database.
 
 ### LLM provider
 
@@ -47,12 +47,12 @@ If the model has a proxy (`juju-https-proxy`), the charm passes it to Hindsight,
 
 ### Database
 
-To scale beyond one unit, relate to PostgreSQL. Hindsight needs pgvector, which must be enabled on the PostgreSQL charm:
+To scale beyond one unit, relate to PostgreSQL. Hindsight keeps everything there, so it needs no `data` storage: deploy it without `--storage`. Hindsight needs pgvector, which must be enabled on the PostgreSQL charm:
 
 ```shell
 juju deploy postgresql-k8s --channel 14/stable --trust \
   --config plugin_vector_enable=true    # 16 track: plugin-vector-enable=true
-juju config hindsight allow-embedded-database=false
+juju deploy hindsight --channel latest/edge --config allow-embedded-database=false
 juju integrate hindsight postgresql-k8s
 juju add-unit hindsight -n 2
 ```
