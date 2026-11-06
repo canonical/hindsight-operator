@@ -32,10 +32,19 @@ extend-exclude = ["lib"]
 select = ["E", "W", "F", "I", "N", "UP", "B"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["charm", "conftest", "defaults", "helpers", "hindsight_env", "workload"]
+known-first-party = [
+    "adopt_requirements",
+    "charm",
+    "check_requirements",
+    "conftest",
+    "defaults",
+    "helpers",
+    "hindsight_env",
+    "workload",
+]
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "lib"]
+pythonpath = ["src", "lib", "scripts"]
 markers = [
     "slow: integration tests that deploy postgresql-k8s",
 ]
