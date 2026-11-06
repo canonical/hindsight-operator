@@ -39,6 +39,7 @@ from defaults import (
     API_SERVICE,
     CONTAINER,
     CONTROL_PLANE_CHECK,
+    CONTROL_PLANE_INGRESS_RELATION,
     CONTROL_PLANE_PORT,
     CONTROL_PLANE_SERVICE,
     DATA_STORAGE,
@@ -96,6 +97,11 @@ class HindsightCharm(ops.CharmBase):
         self.ingress = IngressPerAppRequirer(
             self, relation_name=INGRESS_RELATION, port=API_PORT, strip_prefix=True
         )
+        # No port here, so the library never publishes on its own: the charm
+        # decides in _sync_control_plane_ingress.
+        self.control_plane_ingress = IngressPerAppRequirer(
+            self, relation_name=CONTROL_PLANE_INGRESS_RELATION, strip_prefix=True
+        )
 
         for event in (
             self.on[CONTAINER].pebble_ready,
@@ -106,6 +112,9 @@ class HindsightCharm(ops.CharmBase):
             self.database.on.database_created,
             self.database.on.endpoints_changed,
             self.on[DATABASE_RELATION].relation_broken,
+            self.on[CONTROL_PLANE_INGRESS_RELATION].relation_joined,
+            self.on[CONTROL_PLANE_INGRESS_RELATION].relation_changed,
+            self.on.leader_elected,
         ):
             framework.observe(event, self._reconcile)
         # No-op handlers: these only exist so a check transition runs a hook,
@@ -163,6 +172,7 @@ class HindsightCharm(ops.CharmBase):
         except StatusError as exc:
             logger.info("Not starting Hindsight: %s", exc.status.message)
             self._stop_services()
+            self._sync_control_plane_ingress(publish=False)
             return
 
         if not state.embedded_database:
@@ -178,6 +188,20 @@ class HindsightCharm(ops.CharmBase):
 
         ports = [API_PORT] + ([CONTROL_PLANE_PORT] if state.control_plane_enabled else [])
         self.unit.set_ports(*ports)
+        self._sync_control_plane_ingress(publish=_control_plane_publishable(state))
+
+    def _sync_control_plane_ingress(self, *, publish: bool) -> None:
+        """Publish the Control Plane to its ingress, or withdraw it."""
+        relation = self.model.get_relation(CONTROL_PLANE_INGRESS_RELATION)
+        if relation is None:
+            return
+        if publish:
+            self.control_plane_ingress.provide_ingress_requirements(port=CONTROL_PLANE_PORT)
+            return
+        # Withdrawing leaves the ingress with no backend for the hostname.
+        relation.data[self.unit].clear()
+        if self.unit.is_leader():
+            relation.data[self.app].clear()
 
     def _desired_state(self) -> DesiredState:
         """Derive the workload configuration, or raise :class:`StatusError`."""
@@ -379,6 +403,13 @@ class HindsightCharm(ops.CharmBase):
             notes.append("embedded database; other units blocked")
         elif state.embedded_database:
             notes.append("embedded database")
+        if self.model.get_relation(CONTROL_PLANE_INGRESS_RELATION) and not (
+            _control_plane_publishable(state)
+        ):
+            notes.append(
+                "control plane not published: needs control-plane-enabled "
+                "and hindsight-cp-access-key in env-secret"
+            )
         if state.control_plane_enabled:
             cp = checks.get(CONTROL_PLANE_CHECK)
             if cp is not None and cp.status != ops.pebble.CheckStatus.UP:
@@ -387,6 +418,13 @@ class HindsightCharm(ops.CharmBase):
 
 
 _VOLUME_ERROR = ops.BlockedStatus(f"cannot make {PG0_DATA_DIR} writable; see juju debug-log")
+
+
+def _control_plane_publishable(state: DesiredState) -> bool:
+    """Whether the Control Plane may be exposed: running, and behind a login."""
+    return state.control_plane_enabled and bool(
+        state.control_plane_env.get(hindsight_env.CP_ACCESS_KEY)
+    )
 
 
 _NO_STORAGE_MESSAGE = (

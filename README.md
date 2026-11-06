@@ -71,7 +71,14 @@ To expose the API, for example through Traefik:
 juju integrate hindsight traefik-k8s
 ```
 
-The Control Plane cannot be served under a path prefix. Reach it with `kubectl port-forward svc/hindsight 9999 -n <model>`.
+The Control Plane web UI (port 9999) cannot be served under a path prefix, so it gets its own hostname through the separate `control-plane-ingress` endpoint. The charm publishes it only while `hindsight-cp-access-key` is set in `env-secret`, so the UI is never exposed without a login:
+
+```shell
+juju deploy ingress-configurator hindsight-ui-ingress --trust --config hostname=<ui-hostname>
+juju integrate hindsight:control-plane-ingress hindsight-ui-ingress:ingress
+```
+
+Without it, reach the UI with `kubectl port-forward svc/hindsight 9999 -n <model>`.
 
 ## Security
 

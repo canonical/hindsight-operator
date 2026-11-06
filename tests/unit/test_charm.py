@@ -3,6 +3,7 @@
 """State-transition (Scenario) tests for the hindsight charm."""
 
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -528,3 +529,75 @@ def test_crash_looping_api_says_where_to_look(ctx, pg0_mount, api_up):
 
     assert out.unit_status.name == "waiting"
     assert "pebble logs hindsight-api" in out.unit_status.message
+
+
+def _cp_ingress_state(pg0_mount, secret_content, *, cp_enabled=True, app_data=None):
+    secret = testing.Secret(tracked_content=secret_content)
+    relation = testing.Relation(
+        "control-plane-ingress", local_app_data=app_data or {}, remote_app_name="cp-ingress"
+    )
+    state = _state(
+        containers={_container(pg0_mount)},
+        secrets={secret},
+        relations={relation},
+        leader=True,
+        config={"env-secret": secret.id, "control-plane-enabled": cp_enabled},
+    )
+    return state, relation
+
+
+@pytest.mark.parametrize("event", ["relation_joined", "relation_changed"])
+def test_control_plane_ingress_published_with_access_key(ctx, pg0_mount, event):
+    state, relation = _cp_ingress_state(pg0_mount, {"hindsight-cp-access-key": "cp-key"})
+
+    out = ctx.run(getattr(ctx.on, event)(relation), state)
+
+    data = out.get_relation(relation.id).local_app_data
+    assert json.loads(data["port"]) == 9999
+    assert json.loads(data["name"]) == "hindsight"
+
+
+def test_control_plane_ingress_withheld_without_access_key(ctx, pg0_mount):
+    state, relation = _cp_ingress_state(pg0_mount, {"tenant-api-key": "hs-key"})
+
+    out = ctx.run(ctx.on.relation_joined(relation), state)
+
+    assert out.get_relation(relation.id).local_app_data == {}
+    assert "control plane not published" in out.unit_status.message
+
+
+def test_control_plane_ingress_withheld_when_control_plane_disabled(ctx, pg0_mount):
+    state, relation = _cp_ingress_state(
+        pg0_mount, {"hindsight-cp-access-key": "cp-key"}, cp_enabled=False
+    )
+
+    out = ctx.run(ctx.on.relation_joined(relation), state)
+
+    assert out.get_relation(relation.id).local_app_data == {}
+
+
+def test_control_plane_ingress_withdrawn_when_access_key_removed(ctx, pg0_mount):
+    published = {"port": "9999", "name": '"hindsight"', "model": '"m"'}
+    state, relation = _cp_ingress_state(
+        pg0_mount, {"tenant-api-key": "hs-key"}, app_data=published
+    )
+
+    out = ctx.run(ctx.on.config_changed(), state)
+
+    assert out.get_relation(relation.id).local_app_data == {}
+
+
+def test_api_ingress_is_unaffected_by_control_plane_gating(ctx, pg0_mount):
+    secret = testing.Secret(tracked_content={"tenant-api-key": "hs-key"})
+    relation = testing.Relation("ingress", remote_app_name="api-ingress")
+    state = _state(
+        containers={_container(pg0_mount)},
+        secrets={secret},
+        relations={relation},
+        leader=True,
+        config={"env-secret": secret.id},
+    )
+
+    out = ctx.run(ctx.on.relation_changed(relation), state)
+
+    assert json.loads(out.get_relation(relation.id).local_app_data["port"]) == 8888
