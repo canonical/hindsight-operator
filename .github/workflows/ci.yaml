@@ -119,12 +119,15 @@ jobs:
           # Re-running this job uploads the same files again. Charmhub refuses a
           # duplicate but names the revision it already has, so use that one.
           upload() {
-            local out err
+            local out err existing
             err=$(mktemp)
             if out=$(charmcraft upload "$1" --format json 2>"$err"); then
               jq -er .revision <<<"$out"
-            elif grep -ohP 'Revision of the existing package is: \K[0-9]+' "$err" - <<<"$out"; then
-              echo "$1 is already uploaded; reusing that revision" >&2
+            elif existing=$(grep -ohP 'Revision of the existing package is: \K[0-9]+' "$err" - <<<"$out") &&
+              existing=${existing%%$'\n'*} && [ -n "$existing" ]; then
+              # charmcraft may report it in both streams; take it once.
+              echo "$existing"
+              echo "$1 is already uploaded as revision $existing; reusing it" >&2
             else
               cat "$err" >&2; echo "$out" >&2; return 1
             fi
