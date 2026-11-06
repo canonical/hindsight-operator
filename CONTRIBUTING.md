@@ -69,7 +69,9 @@ To try a branch before merging, publish it to a Charmhub branch, which expires
 
 ```bash
 gh workflow run CI --ref <git-branch> -f charmhub-branch=pr-<N>
-juju deploy hindsight --channel latest/edge/pr-<N>   # or juju refresh --channel
+juju deploy hindsight --channel latest/edge/pr-<N> \
+  --base ubuntu@24.04 --constraints arch=amd64     # Juju needs both for a branch
+juju refresh hindsight --channel latest/edge/pr-<N>  # an existing app has both
 ```
 
 Publishing uses the `CHARMHUB_TOKEN` repository secret, created with
