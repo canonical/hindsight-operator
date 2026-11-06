@@ -224,3 +224,15 @@ __marimo__/
 .claude/settings.local.json
 # Vendored charm libraries (the Python template above ignores lib/)
 !lib/
+
+# Spec Kit writes a feature's working file as specs/NNN-slug/spec.md, with its
+# plans, research, contracts and tasks beside it. Only the requirements are
+# committed: the working file is rewritten into requirements/NNN-slug/requirements.md
+# before review, and scripts/check_requirements.py enforces this in CI
+# (requirements/.kb/requirements.md).
+/specs/
+/requirements/*/*
+!/requirements/*/requirements.md
+!/requirements/.kb/*.md
+# Per-checkout pointer to the current Spec Kit feature.
+/.specify/feature.json

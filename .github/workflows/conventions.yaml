@@ -1,0 +1,32 @@
+# Checks the repository's documentation conventions on every pull request.
+#
+# requirements/ holds one requirements.md per feature and nothing else, and no
+# spec.md is tracked anywhere. Spec Kit writes specs/NNN-slug/spec.md and its
+# other working files, which .gitignore keeps untracked, so the check fails
+# only for a file force-added past the ignore rules or a working file that was
+# not rewritten into requirements/. See requirements/.kb/requirements.md for
+# the policy and scripts/check_requirements.py for the check.
+
+name: conventions
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  requirements:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The check uses the standard library only, so nothing is installed.
+      - name: Check that requirements/ holds requirements only
+        run: python3 scripts/check_requirements.py
