@@ -601,3 +601,17 @@ def test_api_ingress_is_unaffected_by_control_plane_gating(ctx, pg0_mount):
     out = ctx.run(ctx.on.relation_changed(relation), state)
 
     assert json.loads(out.get_relation(relation.id).local_app_data["port"]) == 8888
+
+
+def test_relation_removed_without_storage_does_not_suggest_the_action(ctx, pg0_mount):
+    container = _container(pg0_mount)
+    state = _state(
+        containers={container},
+        storages=set(),
+        leader=True,
+        stored_states={_stored(external_database_used=True)},
+    )
+
+    out = ctx.run(ctx.on.update_status(), state)
+
+    assert out.unit_status == BlockedStatus("database relation removed: relate postgresql again")

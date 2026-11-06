@@ -225,10 +225,13 @@ class HindsightCharm(ops.CharmBase):
         scale_out = False
         if embedded:
             if self._stored.external_database_used:
+                # Only suggest the action where it can work: it needs the volume.
                 raise StatusError(
                     ops.BlockedStatus(
                         "database relation removed: relate postgresql again, "
                         "or run use-embedded-database"
+                        if self._has_data_storage()
+                        else "database relation removed: relate postgresql again"
                     )
                 )
             if not self.config["allow-embedded-database"]:
