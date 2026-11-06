@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from defaults import (
     API_SERVICE,
     CONTAINER,
     CONTROL_PLANE_CHECK,
+    CONTROL_PLANE_INGRESS_RELATION,
     CONTROL_PLANE_PORT,
     CONTROL_PLANE_SERVICE,
     DATA_STORAGE,
@@ -89,12 +91,20 @@ class HindsightCharm(ops.CharmBase):
             # Preparing the pg0 volume failed; kept across hooks so status
             # keeps showing the cause until a later reconcile succeeds.
             volume_error=False,
+            # Access key that locks a Control Plane that must not serve; random
+            # and kept, so it does not change the plan (and restart it) each hook.
+            control_plane_lockout_key="",
         )
         self.database = DatabaseRequires(
             self, relation_name=DATABASE_RELATION, database_name=DATABASE_NAME
         )
         self.ingress = IngressPerAppRequirer(
             self, relation_name=INGRESS_RELATION, port=API_PORT, strip_prefix=True
+        )
+        # No port here, so the library never publishes on its own: the charm
+        # decides in _sync_control_plane_ingress.
+        self.control_plane_ingress = IngressPerAppRequirer(
+            self, relation_name=CONTROL_PLANE_INGRESS_RELATION, strip_prefix=True
         )
 
         for event in (
@@ -106,6 +116,9 @@ class HindsightCharm(ops.CharmBase):
             self.database.on.database_created,
             self.database.on.endpoints_changed,
             self.on[DATABASE_RELATION].relation_broken,
+            self.on[CONTROL_PLANE_INGRESS_RELATION].relation_joined,
+            self.on[CONTROL_PLANE_INGRESS_RELATION].relation_changed,
+            self.on.leader_elected,
         ):
             framework.observe(event, self._reconcile)
         # No-op handlers: these only exist so a check transition runs a hook,
@@ -163,21 +176,65 @@ class HindsightCharm(ops.CharmBase):
         except StatusError as exc:
             logger.info("Not starting Hindsight: %s", exc.status.message)
             self._stop_services()
+            self._sync_control_plane_ingress(publish=False)
             return
 
         if not state.embedded_database:
             self._stored.external_database_used = True
 
-        layer = workload.build_layer(
-            state.api_env, state.control_plane_env, state.control_plane_enabled
-        )
+        run_control_plane = self._control_plane_should_run(state)
+        control_plane_env = state.control_plane_env
+        if not run_control_plane:
+            # Pebble's replan restarts any service whose configuration changed,
+            # even one that is stopped and disabled. So a Control Plane that must
+            # not serve gets a random access key nobody knows, and is stopped
+            # both before and after the replan.
+            control_plane_env = {
+                **control_plane_env,
+                hindsight_env.CP_ACCESS_KEY: self._control_plane_lockout_key(),
+            }
+            self._stop_services(CONTROL_PLANE_SERVICE)
+        layer = workload.build_layer(state.api_env, control_plane_env, run_control_plane)
         self.container.add_layer(CONTAINER, layer, combine=True)
         self.container.replan()
-        if not state.control_plane_enabled:
+        if not run_control_plane:
             self._stop_services(CONTROL_PLANE_SERVICE)
 
-        ports = [API_PORT] + ([CONTROL_PLANE_PORT] if state.control_plane_enabled else [])
+        ports = [API_PORT] + ([CONTROL_PLANE_PORT] if run_control_plane else [])
         self.unit.set_ports(*ports)
+        self._sync_control_plane_ingress(publish=_control_plane_publishable(state))
+
+    def _control_plane_lockout_key(self) -> str:
+        """A random access key that locks the Control Plane; kept stable to avoid restarts."""
+        if not self._stored.control_plane_lockout_key:
+            self._stored.control_plane_lockout_key = secrets.token_urlsafe(32)
+        return str(self._stored.control_plane_lockout_key)
+
+    def _control_plane_should_run(self, state: DesiredState) -> bool:
+        """Whether to run the Control Plane.
+
+        With an ingress relation it runs only behind a login: an ingress may
+        keep routing to it after its relation data is withdrawn, so nothing must
+        be listening without the access key.
+        """
+        if not state.control_plane_enabled:
+            return False
+        if self.model.get_relation(CONTROL_PLANE_INGRESS_RELATION) is None:
+            return True
+        return _control_plane_publishable(state)
+
+    def _sync_control_plane_ingress(self, *, publish: bool) -> None:
+        """Publish the Control Plane to its ingress, or withdraw it."""
+        relation = self.model.get_relation(CONTROL_PLANE_INGRESS_RELATION)
+        if relation is None:
+            return
+        if publish:
+            self.control_plane_ingress.provide_ingress_requirements(port=CONTROL_PLANE_PORT)
+            return
+        # Withdrawing leaves the ingress with no backend for the hostname.
+        relation.data[self.unit].clear()
+        if self.unit.is_leader():
+            relation.data[self.app].clear()
 
     def _desired_state(self) -> DesiredState:
         """Derive the workload configuration, or raise :class:`StatusError`."""
@@ -382,7 +439,12 @@ class HindsightCharm(ops.CharmBase):
             notes.append("embedded database; other units blocked")
         elif state.embedded_database:
             notes.append("embedded database")
-        if state.control_plane_enabled:
+        run_control_plane = self._control_plane_should_run(state)
+        if state.control_plane_enabled and not run_control_plane:
+            notes.append(
+                "control plane stopped: its ingress needs hindsight-cp-access-key in env-secret"
+            )
+        if run_control_plane:
             cp = checks.get(CONTROL_PLANE_CHECK)
             if cp is not None and cp.status != ops.pebble.CheckStatus.UP:
                 notes.append("control plane down")
@@ -390,6 +452,13 @@ class HindsightCharm(ops.CharmBase):
 
 
 _VOLUME_ERROR = ops.BlockedStatus(f"cannot make {PG0_DATA_DIR} writable; see juju debug-log")
+
+
+def _control_plane_publishable(state: DesiredState) -> bool:
+    """Whether the Control Plane may be exposed: running, and behind a login."""
+    return state.control_plane_enabled and bool(
+        state.control_plane_env.get(hindsight_env.CP_ACCESS_KEY)
+    )
 
 
 _NO_STORAGE_MESSAGE = (

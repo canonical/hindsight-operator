@@ -93,6 +93,14 @@ requires:
     interface: ingress
     limit: 1
     optional: true
+  control-plane-ingress:
+    # The Control Plane web UI (port 9999) needs its own hostname: it cannot
+    # be served under a path prefix. The charm only publishes it while
+    # `hindsight-cp-access-key` is set in env-secret, so the UI is never
+    # exposed without a login.
+    interface: ingress
+    limit: 1
+    optional: true
 
 config:
   options:
