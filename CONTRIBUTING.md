@@ -64,6 +64,14 @@ and `test_proxy.py` on native amd64 and arm64 runners. Pushes to `main` then als
 and the image named by `upstream-source`, release them to `latest/edge`, and
 run `test_published.py` against that release on both architectures.
 
+To try a branch before merging, publish it to a Charmhub branch, which expires
+30 days after its last release:
+
+```bash
+gh workflow run CI --ref <git-branch> -f charmhub-branch=pr-<N>
+juju deploy hindsight --channel latest/edge/pr-<N>   # or juju refresh --channel
+```
+
 Publishing uses the `CHARMHUB_TOKEN` repository secret, created with
 `charmcraft login --export` and limited to this charm. Release to other channels
 by hand with `charmcraft release`.
