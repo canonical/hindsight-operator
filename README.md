@@ -68,10 +68,20 @@ If the relation is later removed, the charm blocks rather than switching to an e
 To expose the API, for example through Traefik:
 
 ```shell
-juju integrate hindsight traefik-k8s
+juju integrate hindsight:ingress traefik-k8s
 ```
 
-The Control Plane cannot be served under a path prefix. Reach it with `kubectl port-forward svc/hindsight 9999 -n <model>`.
+The Control Plane web UI (port 9999) cannot be served under a path prefix, so it gets its own hostname through the separate `control-plane-ingress` endpoint, for example with `ingress-configurator` in front of an HAProxy ingress:
+
+```shell
+juju deploy ingress-configurator hindsight-ui-ingress --trust --config hostname=<ui-hostname>
+juju integrate hindsight-ui-ingress:haproxy-route <haproxy-app-or-offer>
+juju integrate hindsight:control-plane-ingress hindsight-ui-ingress:ingress
+```
+
+While this relation exists, the Control Plane runs only with `hindsight-cp-access-key` set in `env-secret`. Without it the charm stops the UI and withdraws the route, so it is never reachable without a login.
+
+Without an ingress, reach the UI with `kubectl port-forward svc/hindsight 9999 -n <model>`.
 
 ## Security
 

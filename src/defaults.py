@@ -37,6 +37,8 @@ PG0_DATA_DIR = f"{WORKLOAD_HOME}/.pg0"
 DATABASE_RELATION = "database"
 DATABASE_NAME = "hindsight"
 INGRESS_RELATION = "ingress"
+# Publishes the Control Plane (port 9999) on its own hostname, only with an access key.
+CONTROL_PLANE_INGRESS_RELATION = "control-plane-ingress"
 
 # Built-in API-key tenant extension, enabled when `tenant-api-key` is supplied.
 API_KEY_TENANT_EXTENSION = "hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension"
