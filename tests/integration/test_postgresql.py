@@ -23,6 +23,7 @@ def deployed(juju: jubilant.Juju, charm, resources):
         # Hindsight requires pgvector; the relation user cannot CREATE EXTENSION.
         config={"plugin_vector_enable": True},
     )
+    # No --storage: with an external database, Hindsight needs no volume.
     juju.deploy(charm, APP, resources=resources, config={"allow-embedded-database": False})
     # Without a database (and embedded mode disallowed) hindsight blocks.
     juju.wait(lambda s: jubilant.all_blocked(s, APP))
@@ -90,10 +91,12 @@ def test_removing_relation_blocks_instead_of_using_empty_pg0(juju: jubilant.Juju
     assert juju.status().apps[APP].units[f"{APP}/0"].workload_status.current == "blocked"
 
 
-def test_use_embedded_database_action(juju: jubilant.Juju):
-    task = juju.run(f"{APP}/0", "use-embedded-database")
-    assert task.results["result"] == "switched to the embedded database"
-    wait_active(juju)
+def test_use_embedded_database_action_refuses_without_storage(juju: jubilant.Juju):
+    # This unit was deployed without the data volume, so the embedded database
+    # would lose everything on a pod restart: the action must refuse.
+    with pytest.raises(jubilant.TaskError) as exc:
+        juju.run(f"{APP}/0", "use-embedded-database")
+    assert "no data storage" in exc.value.task.message
     status = juju.status().apps[APP].units[f"{APP}/0"].workload_status
-    assert status.message == "embedded database"
-    assert "HINDSIGHT_API_DATABASE_URL" not in api_environment(juju, f"{APP}/0")
+    assert status.current == "blocked"
+    assert status.message.startswith("database relation removed")

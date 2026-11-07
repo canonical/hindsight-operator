@@ -41,6 +41,7 @@ from defaults import (
     CONTROL_PLANE_CHECK,
     CONTROL_PLANE_PORT,
     CONTROL_PLANE_SERVICE,
+    DATA_STORAGE,
     DATABASE_NAME,
     DATABASE_RELATION,
     INGRESS_RELATION,
@@ -137,6 +138,12 @@ class HindsightCharm(ops.CharmBase):
         if self.model.relations[DATABASE_RELATION]:
             event.fail("the database relation still exists; remove it first")
             return
+        if not self._has_data_storage():
+            event.fail(
+                "this unit has no data storage, which the embedded database needs; "
+                "redeploy with --storage data=1G, or relate postgresql again"
+            )
+            return
         self._stored.external_database_used = False
         self._reconcile(event)
         event.set_results({"result": "switched to the embedded database"})
@@ -194,16 +201,19 @@ class HindsightCharm(ops.CharmBase):
         scale_out = False
         if embedded:
             if self._stored.external_database_used:
+                # Only suggest the action where it can work: it needs the volume.
                 raise StatusError(
                     ops.BlockedStatus(
-                        "database relation removed: relate postgresql-k8s again, "
-                        "or run the use-embedded-database action"
+                        "database relation removed: relate postgresql again, "
+                        "or run use-embedded-database"
+                        if self._has_data_storage()
+                        else "database relation removed: relate postgresql again"
                     )
                 )
             if not self.config["allow-embedded-database"]:
                 raise StatusError(
                     ops.BlockedStatus(
-                        "no database: relate to postgresql-k8s or set allow-embedded-database"
+                        "no database: relate postgresql (allow-embedded-database is off)"
                     )
                 )
             if self.app.planned_units() > 1:
@@ -212,11 +222,14 @@ class HindsightCharm(ops.CharmBase):
                 if not self._pg0_has_data():
                     raise StatusError(
                         ops.BlockedStatus(
-                            "embedded database supports one unit; "
-                            "relate to postgresql-k8s to scale"
+                            "embedded database supports one unit: relate postgresql to scale"
                         )
                     )
                 scale_out = True
+            if not self._has_data_storage():
+                # Without the volume, pg0 would write to the container's own
+                # filesystem and lose every memory when the pod restarts.
+                raise StatusError(ops.BlockedStatus(_NO_STORAGE_MESSAGE))
 
         return DesiredState(
             api_env=api_env,
@@ -225,6 +238,10 @@ class HindsightCharm(ops.CharmBase):
             embedded_database=embedded,
             embedded_scale_out=scale_out,
         )
+
+    def _has_data_storage(self) -> bool:
+        """Whether this unit has the `data` volume the embedded database needs."""
+        return bool(self.model.storages[DATA_STORAGE])
 
     def _pg0_has_data(self) -> bool:
         """Whether this unit's pg0 volume holds an initialised database."""
@@ -247,7 +264,9 @@ class HindsightCharm(ops.CharmBase):
             data.get("endpoints"),
         )
         if not (username and password and endpoints):
-            raise StatusError(ops.WaitingStatus("waiting for database credentials"))
+            raise StatusError(
+                ops.WaitingStatus("waiting for credentials over the database relation")
+            )
         return hindsight_env.DatabaseCredentials(
             username=username,
             password=password,
@@ -264,7 +283,9 @@ class HindsightCharm(ops.CharmBase):
         except (ops.SecretNotFoundError, ops.ModelError) as exc:
             logger.warning("Could not read env-secret %s: %s", secret_id, exc)
             raise StatusError(
-                ops.BlockedStatus("cannot read env-secret; run `juju grant-secret` for this app")
+                ops.BlockedStatus(
+                    f"cannot read env-secret: run `juju grant-secret <secret> {self.app.name}`"
+                )
             ) from exc
 
     def _prepare_embedded_database(self) -> None:
@@ -302,6 +323,18 @@ class HindsightCharm(ops.CharmBase):
             ["chown", "-R", f"{WORKLOAD_USER}:{WORKLOAD_GROUP}", PG0_DATA_DIR]
         ).wait()
 
+    def _api_crash_looping(self) -> bool:
+        """Whether Pebble is restarting the API after it exited.
+
+        ops has no enum member for Pebble's "backoff", so it passes the raw
+        string through.
+        """
+        info = self.container.get_services(API_SERVICE).get(API_SERVICE)
+        if info is None:
+            return False
+        current = getattr(info.current, "value", info.current)
+        return current in ("backoff", "error")
+
     def _stop_services(self, *names: str) -> None:
         services = self.container.get_services(*names)
         running = [name for name, svc in services.items() if svc.is_running()]
@@ -333,7 +366,15 @@ class HindsightCharm(ops.CharmBase):
         # right after a replan it can still read "up" while the API is down.
         # The charm container shares the pod network, so probe directly too.
         if not (_check_passing(checks.get(API_READY_CHECK)) and api_responding()):
-            event.add_status(ops.WaitingStatus("waiting for Hindsight API to become ready"))
+            if self._api_crash_looping():
+                event.add_status(
+                    ops.WaitingStatus(
+                        "Hindsight API keeps exiting: see `pebble logs hindsight-api` "
+                        "in the hindsight container"
+                    )
+                )
+            else:
+                event.add_status(ops.WaitingStatus("waiting for Hindsight API to become ready"))
             return
 
         notes = []
@@ -349,6 +390,11 @@ class HindsightCharm(ops.CharmBase):
 
 
 _VOLUME_ERROR = ops.BlockedStatus(f"cannot make {PG0_DATA_DIR} writable; see juju debug-log")
+
+
+_NO_STORAGE_MESSAGE = (
+    "no database: relate postgresql, or redeploy with --storage data=1G for the embedded one"
+)
 
 
 def api_responding(timeout: float = 3.0) -> bool:

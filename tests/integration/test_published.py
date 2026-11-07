@@ -28,7 +28,13 @@ def deployed(juju: jubilant.Juju):
     # No resources are passed, so the image can only come from Charmhub.
     # Juju can't pick a release from a branch channel (track/risk/branch) by
     # itself: it needs the base and architecture given explicitly.
-    juju.deploy(APP, channel=CHANNEL, base=METADATA["base"], constraints={"arch": ARCH})
+    juju.deploy(
+        APP,
+        channel=CHANNEL,
+        base=METADATA["base"],
+        constraints={"arch": ARCH},
+        storage={"data": "1G"},
+    )
     wait_active(juju)
 
 
