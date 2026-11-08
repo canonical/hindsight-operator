@@ -1,0 +1,20 @@
+summary: MCP clients get the same per-key bank access as the REST API
+
+execute: |
+  . "${PROJECT_PATH}/spread/lib/hindsight.sh"
+  load_state
+  init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"spread","version":"0"}}}'
+  call() { echo "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":{}}}"; }
+
+  # A tenant may open an MCP session on its own bank, not on others'.
+  expect 200 as alice POST /mcp/alice-notes/ "${init}"
+  expect 403 as alice POST /mcp/bob-notes/ "${init}"
+
+  # Read-only keys may call read tools but not write tools.
+  expect 403 as auditor POST /mcp/alice-notes/ "$(call retain)"
+  expect 403 as alice POST /mcp/shared/ "$(call retain)"
+  # Tools that reach across banks are never available to tenants.
+  expect 403 as alice POST /mcp/alice-notes/ "$(call list_banks)"
+  # The multi-bank endpoint is admin-only.
+  expect 403 as alice POST /mcp/ "${init}"
+  expect 200 as admin POST /mcp/ "${init}"

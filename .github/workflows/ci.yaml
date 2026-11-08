@@ -70,6 +70,31 @@ jobs:
           tests/integration/test_embedded.py tests/integration/test_proxy.py
           tests/integration/test_bank_access.py tests/integration/test_bank_access_scenarios.py
 
+  spread:
+    # Demonstrates per-key bank access against a live deployment, task by task.
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: charm-amd64
+      - name: Free disk space for the Hindsight image
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Install spread
+        run: |
+          go install github.com/canonical/spread/cmd/spread@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run the multi-tenancy suite
+        env:
+          CRAFT_ARTIFACT: ${{ github.workspace }}/hindsight_amd64.charm
+          SPREAD_PASSWORD: ${{ github.run_id }}-spread
+        run: |
+          # Docker on the runner otherwise drops pod traffic.
+          sudo iptables -P FORWARD ACCEPT
+          spread -v ci:
+
   publish:
     needs: [lint-unit, integration]
     # main publishes to latest/edge. Any ref can publish to a Charmhub branch

@@ -1,0 +1,19 @@
+summary: Read-only keys can recall but never change anything
+
+execute: |
+  . "${PROJECT_PATH}/spread/lib/hindsight.sh"
+  load_state
+
+  # The admin writes the shared handbook that both tenants may only read.
+  expect 200 retain admin shared "The office is closed on Fridays."
+  expect 200 recall alice shared "office closed"
+  echo "${BODY}" | jq -e '[.results[].text] | any(test("Fridays"))'
+  expect 403 retain alice shared "The office is open on Fridays."
+  echo "${BODY}" | jq -e '.detail | test("read-only")'
+
+  # The auditor reads every bank but writes, creates and deletes none.
+  expect 200 recall auditor alice-notes "project codename"
+  expect 200 recall auditor bob-notes "project codename"
+  expect 403 retain auditor alice-notes "Audited."
+  expect 403 as auditor PUT /v1/default/banks/auditor-notes '{}'
+  expect 403 as auditor DELETE /v1/default/banks/shared

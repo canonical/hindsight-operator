@@ -1,0 +1,18 @@
+summary: Listing banks only shows a key the banks it may use
+
+execute: |
+  . "${PROJECT_PATH}/spread/lib/hindsight.sh"
+  load_state
+
+  test "$(banks_of alice)" = "alice-notes shared"
+  test "$(banks_of bob)" = "bob-notes shared"
+  # "private" belongs to no tenant: only the admin sees it.
+  test "$(banks_of auditor)" = "alice-notes bob-notes private shared"
+  echo "ok: each key lists only its banks"
+
+  # A tenant can create new banks, but only within its own name pattern.
+  expect 200 as alice PUT /v1/default/banks/alice-diary '{}'
+  expect 403 as alice PUT /v1/default/banks/bob-diary '{}'
+  banks_of alice | grep -qw alice-diary
+  # (Not "! ...": set -e ignores failures of negated commands.)
+  if banks_of bob | grep -qw alice-diary; then echo "bob sees alice's new bank"; exit 1; fi

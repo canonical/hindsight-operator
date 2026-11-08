@@ -1,0 +1,26 @@
+summary: Each tenant keeps private memories that no other tenant can read or change
+
+execute: |
+  . "${PROJECT_PATH}/spread/lib/hindsight.sh"
+  load_state
+
+  # Alice and Bob each remember something in their own bank.
+  retain alice alice-notes "Alice's project codename is Zebra."
+  [ "${STATUS}" = 200 ] || { echo "alice could not write her own bank: ${BODY}"; exit 1; }
+  retain bob bob-notes "Bob's project codename is Giraffe."
+  [ "${STATUS}" = 200 ] || { echo "bob could not write his own bank: ${BODY}"; exit 1; }
+
+  # Each recalls their own memory...
+  recall alice alice-notes "project codename"
+  echo "${BODY}" | jq -e '[.results[].text] | any(test("Zebra"))'
+  recall bob bob-notes "project codename"
+  echo "${BODY}" | jq -e '[.results[].text] | any(test("Giraffe"))'
+
+  # ...but not each other's, and they cannot write there either.
+  expect 403 recall alice bob-notes "project codename"
+  expect 403 recall bob alice-notes "project codename"
+  expect 403 retain alice bob-notes "Alice was here."
+  expect 403 as bob DELETE /v1/default/banks/alice-notes
+
+  # Nobody without a key gets anywhere.
+  expect 401 recall nobody alice-notes "project codename"

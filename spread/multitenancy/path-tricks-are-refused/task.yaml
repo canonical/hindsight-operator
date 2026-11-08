@@ -1,0 +1,16 @@
+summary: Encoded or relative paths cannot reach another tenant's bank
+
+execute: |
+  . "${PROJECT_PATH}/spread/lib/hindsight.sh"
+  load_state
+  body='{"query":"project codename"}'
+
+  # curl --path-as-is (set in the helper) sends these exactly as written.
+  expect 400 as alice POST "/v1/default/banks/alice-notes/../bob-notes/memories/recall" "${body}"
+  expect 400 as alice POST "/v1/default/banks/alice-notes%2F..%2Fbob-notes/memories/recall" "${body}"
+  expect 400 as alice POST "/v1/default/banks/%2E%2E/memories/recall" "${body}"
+  expect 400 as alice POST "/v1/default/banks//bob-notes/memories/recall" "${body}"
+  expect 400 as alice POST "/mcp/%2E%2E/" '{}'
+  # Bank names match exactly and case-sensitively.
+  expect 403 recall alice Alice-notes "project codename"
+  expect 403 recall alice xalice-notes "project codename"
