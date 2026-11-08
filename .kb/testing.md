@@ -40,6 +40,8 @@ uv run --group lint ruff check src tests
 - `test_embedded.py`: a single unit on pg0.
 - `test_postgresql.py`: `postgresql-k8s` with pgvector, with memory shared across units.
 - `test_proxy.py`: LLM traffic follows the model's proxy settings, using a fake key. Nothing leaves the pod.
+- `test_bank_access.py`: per-key bank access on a live unit: the gateway in front of the API, isolation, read-only keys, admin-only routes, raw-path traversal, MCP, and turning the feature off.
+- `test_bank_access_scenarios.py`: per-key bank access as a story of two agents and an auditor storing and recalling real memories.
 - `test_published.py`: deploys a Charmhub release. Skipped unless `CHARM_CHANNEL` is set. `EXPECTED_CHARM_REVISION` pins the revision.
 
 Environment variables: `JUJU_CONTROLLER` (required), `CHARM_PATH`, `HINDSIGHT_IMAGE`, `KEEP_MODELS=1`.
@@ -48,6 +50,10 @@ Environment variables: `JUJU_CONTROLLER` (required), `CHARM_PATH`, `HINDSIGHT_IM
 
 The supported local setup is a throwaway LXD VM with its own MicroK8s controller, prepared by concierge with the same `concierge.yaml` that CI uses. `CONTRIBUTING.md` has the commands. The upstream image is large, so give the VM at least 8 CPUs, 24 GiB of memory and 80 GiB of disk.
 
+## Spread
+
+`spread.yaml` and `spread/multitenancy/` demonstrate per-key bank access as one task per scenario, each a `curl` script that prints an `ok:` line per check. The suite's setup bootstraps Juju on MicroK8s with the same `concierge.yaml` as CI when no controller exists, and deploys the charm named by `CRAFT_ARTIFACT`. `spread/lib/hindsight.sh` sends paths with `curl --path-as-is`, since most HTTP clients normalise `..` before sending.
+
 ## CI
 
-`.github/workflows/ci.yaml` runs lint and unit tests, packs the charm on amd64 and arm64, and runs `test_embedded.py` and `test_proxy.py` on a MicroK8s controller that `.github/actions/setup-k8s` bootstraps on each runner. `test_postgresql.py` is not run in CI.
+`.github/workflows/ci.yaml` runs lint and unit tests, packs the charm on amd64 and arm64, and runs `test_embedded.py`, `test_proxy.py`, `test_bank_access.py` and `test_bank_access_scenarios.py` on a MicroK8s controller that `.github/actions/setup-k8s` bootstraps on each runner. The `spread` job runs `charmcraft test` on an amd64 runner, which packs the charm and, with `CI` set, runs the suite on the runner itself. `test_postgresql.py` is not run in CI.

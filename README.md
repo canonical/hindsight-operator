@@ -83,6 +83,34 @@ While this relation exists, the Control Plane runs only with `hindsight-cp-acces
 
 Without an ingress, reach the UI with `kubectl port-forward svc/hindsight 9999 -n <model>`.
 
+## Per-key bank access
+
+Give each client application its own API key, limited to the memory banks it may use. `banks` are read and write, `read-banks` are read only, and names may be shell-style patterns:
+
+```shell
+juju add-secret hindsight-access-keys \
+  medic-agent=$(openssl rand -hex 32) auditor=$(openssl rand -hex 32)
+juju grant-secret hindsight-access-keys hindsight
+juju config hindsight access-keys=secret:<id> bank-access='
+medic-agent:
+  banks: [medic-*]
+  read-banks: [shared]
+auditor:
+  read-banks: ["*"]
+'
+```
+
+Clients send their key as `Authorization: Bearer <key>`. A key then:
+
+- lists, recalls from and reflects on only the banks it may read
+- stores in, changes, deletes and creates only banks matching its `banks`
+- gets on `/mcp/<bank>/` only the MCP tools its access to that bank allows
+- is refused anything that spans banks: `/metrics`, chunks and files fetched by ID, and the multi-bank `/mcp/` endpoint
+
+Anything the charm does not recognise as an operation on one bank is refused to client keys, and each refusal is logged with the client's name, never its key. The admin key (`tenant-api-key` in `env-secret`, required) keeps full access, and the Control Plane uses it. All banks stay in one database schema: a gateway in the Hindsight pod enforces the access, not PostgreSQL.
+
+An invalid `bank-access`, a client without a key, or a missing admin key blocks the unit with a message. Clear `bank-access` to turn the feature off: the API then accepts only the admin key.
+
 ## Security
 
 Without `tenant-api-key`, the API accepts unauthenticated requests from anything that can reach it. Set a tenant key before exposing the API.

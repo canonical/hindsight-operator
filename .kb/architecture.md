@@ -28,6 +28,15 @@ A unit that has served from the `database` relation never switches to the embedd
 The workload is the upstream `ghcr.io/vectorize-io/hindsight` image, pinned by `upstream-source` in `charmcraft.yaml`. `src/defaults.py` mirrors its container layout. Update both together when the image changes its paths, user or ports.
 
 
+## §6 - Per-key access is deny by default
+
+While `bank-access` is set, every request on the API's port passes the gateway in `src/gateway/`. A client key reaches only routes the gateway classifies as an operation on one bank the key may use. Add a route to the classification in `src/gateway/policy.py` only after checking what it does in the pinned Hindsight version. Never forward an unclassified route to a client key.
+
+## §7 - One policy
+
+The charm validates `bank-access` with `src/gateway/policy.py`, the same module the gateway enforces. Do not parse or check the configuration a second way.
+
+
 # Concepts
 
 ## Modules
@@ -36,6 +45,7 @@ The workload is the upstream `ghcr.io/vectorize-io/hindsight` image, pinned by `
 - `src/hindsight_env.py`: config, secret and relation data to environment variables for the API and Control Plane.
 - `src/workload.py`: the Pebble layer. Two services, `hindsight-api` and `hindsight-control-plane`, and their checks.
 - `src/defaults.py`: container paths, ports, service, check and relation names.
+- `src/gateway/`: the per-key bank-access gateway, shipped in the charm and pushed into the workload container. `policy.py` is pure: configuration parsing, key identification and request classification. `app.py` is the Starlette proxy.
 - `lib/charms/`: vendored charm libraries, `data_platform_libs.v0.data_interfaces` and `traefik_k8s.v2.ingress`. Update them with `charmcraft fetch-libs`, never by hand.
 
 ## Workload
@@ -55,9 +65,20 @@ The workload is the upstream `ghcr.io/vectorize-io/hindsight` image, pinned by `
 
 - `env-secret` names a Juju secret. Each key becomes an environment variable: `llm-api-key` becomes `HINDSIGHT_API_LLM_API_KEY`. `tenant-api-key` turns on the API-key tenant extension, and `hindsight-cp-access-key` protects the Control Plane.
 - `extra-env` passes other non-secret Hindsight settings.
+- `bank-access` maps client names to `banks` and `read-banks` patterns, and `access-keys` names a Juju secret mapping client names to their keys. Per-key access needs `tenant-api-key` as the admin key.
 - `ann-iterative-scan=false` is for pgvector older than 0.8.0.
 
 ## Relations
 
 - `database` (`postgresql_client`, limit 1, optional).
 - `ingress` (`ingress`): the API only, with the path prefix stripped. The Control Plane cannot be served under a prefix.
+
+## Per-key bank access
+
+- Off (`bank-access` empty): the API listens on `0.0.0.0:8888`. The `hindsight-gateway` Pebble service is defined but disabled, its command is `sleep infinity`, and the charm stops it after each replan. Pebble's replan starts a service whose definition changed even when it is disabled, so a disabled gateway with its real command would crash without its configuration and fail the replan, or hold port 8888.
+- On: the gateway listens on `0.0.0.0:8888` and the API on `127.0.0.1:8890`, so nothing outside the pod reaches the API directly. The gateway runs with uvicorn, Starlette and httpx from the image's `/app/api/.venv`, from code the charm pushes to `/home/hindsight/.hindsight-gateway`. The Control Plane keeps calling `localhost:8888` with the admin key.
+- The gateway authenticates `Authorization: Bearer`, comparing in constant time with the admin key and every client key. The admin key is forwarded unchanged. A client's allowed request is forwarded with the admin key, its own `Authorization`, `X-Api-Key` and `Cookie` removed. Bodies stream in both directions.
+- Requests are classified on the raw, percent-encoded path, which is forwarded unchanged, so the gateway and the API agree on the bank. Paths with `//`, `/./`, `/../`, or a bank segment decoding to `.`, `..`, or containing `/`, `\` or NUL are refused.
+- Hindsight 0.9.2's own per-bank hooks (`validate_bank_read`, `validate_bank_write`) are not called on document export, mental-model history, or imports into an existing bank. The gateway does not rely on them.
+- In Hindsight 0.9.2 a bank's MCP endpoint takes the bank only from its URL, and its tools take no bank argument. The gateway reads an MCP `POST` body to judge each `tools/call`.
+
