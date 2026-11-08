@@ -40,6 +40,9 @@ PUBLIC_PATHS = frozenset(
 BANK_LIST_PATH = "/v1/default/banks"
 _BANK_PREFIX = "/v1/default/banks/"
 _MCP_PREFIX = "/mcp/"
+# Streamable HTTP: POST sends messages, GET opens the event stream, DELETE ends
+# the session.
+_MCP_METHODS = frozenset({"POST", "GET", "DELETE"})
 
 # POST routes under a bank that only read. Every other POST, and every PUT,
 # PATCH and DELETE, writes. Checked against Hindsight 0.9.2's routes.
@@ -175,6 +178,9 @@ def classify(method: str, path: str) -> Request:
         bank = _bank_segment(bank_raw)
         if bank is None:
             return Request(Kind.INVALID, reason="invalid bank id")
+        if method not in _MCP_METHODS:
+            # Only a POST body is checked, so no other method may carry tool calls.
+            return Request(Kind.ADMIN_ONLY, reason=f"method {method} on MCP")
         return Request(Kind.MCP_BANK, bank=bank)
 
     # Everything else: the multi-bank MCP endpoint, chunks and files fetched by

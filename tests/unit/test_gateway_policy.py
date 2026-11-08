@@ -145,6 +145,14 @@ def test_mcp_tools_by_key():
     assert not decide(ALICE, classify("POST", "/mcp/bob-1/"), _call("recall")).allowed
 
 
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "OPTIONS", "HEAD"])
+def test_mcp_methods_without_a_checked_body_are_refused(method):
+    """FR-010."""
+    request = classify(method, "/mcp/alice-1/")
+    assert request.kind is Kind.ADMIN_ONLY
+    assert decide(ALICE, request, None).status == 403
+
+
 def test_mcp_batches_and_garbage():
     """FR-010."""
     batch = json.dumps(
