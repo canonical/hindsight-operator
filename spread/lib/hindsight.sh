@@ -37,7 +37,10 @@ deploy_hindsight_with_tenants() {
     juju add-model "${MODEL}"
     # Juju schedules pods on amd64 nodes unless told otherwise.
     juju set-model-constraints -m "${MODEL}" arch="$(dpkg --print-architecture)"
-    juju deploy -m "${MODEL}" "${CRAFT_ARTIFACT}" hindsight \
+    # The Juju snap can always read its own directory.
+    mkdir -p ~/snap/juju/common
+    cp "${CRAFT_ARTIFACT}" ~/snap/juju/common/hindsight.charm
+    juju deploy -m "${MODEL}" ~/snap/juju/common/hindsight.charm hindsight \
         --resource hindsight-image="${image}" --storage data=1G
 
     env_secret=$(juju add-secret -m "${MODEL}" hindsight-env tenant-api-key="${ADMIN_KEY}")

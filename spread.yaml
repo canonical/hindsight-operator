@@ -1,35 +1,14 @@
 project: hindsight-operator
 
-# Run with `charmcraft test` (craft backend: charmcraft packs the charm and
-# passes it in CRAFT_ARTIFACT), or with spread directly on an LXD VM or a CI
-# runner: `spread lxd-vm:` / `spread ci:` (set CRAFT_ARTIFACT to a packed charm).
+# Run with `charmcraft test`, which packs the charm, copies it into the
+# project and sets CRAFT_ARTIFACT. It runs the suite in a new LXD VM, or
+# directly on the machine when CI is set (spread/.extension). This file uses
+# charmcraft's test format, which plain spread cannot read.
 backends:
   craft:
     type: craft
     systems:
       - ubuntu-24.04:
-
-  lxd-vm:
-    type: adhoc
-    allocate: CPU=4 MEM=16 DISK=60 spread/.extension allocate lxd-vm
-    discard: spread/.extension discard lxd-vm
-    systems:
-      - ubuntu-24.04:
-          username: root
-          password: "$(HOST: echo ${SPREAD_PASSWORD:-hindsight})"
-
-  ci:
-    type: adhoc
-    allocate: spread/.extension allocate ci
-    discard: spread/.extension discard ci
-    systems:
-      - ubuntu-24.04:
-          username: root
-          password: "$(HOST: echo ${SPREAD_PASSWORD:-hindsight})"
-
-environment:
-  SPREAD_PASSWORD: "$(HOST: echo ${SPREAD_PASSWORD:-hindsight})"
-  CRAFT_ARTIFACT: "$(HOST: echo ${CRAFT_ARTIFACT})"
 
 prepare: |
   # Juju needs the charm etc. to be owned by the running user.
@@ -54,6 +33,5 @@ suites:
 exclude:
   - .git
   - .venv
-  - "*.charm"
 
 kill-timeout: 1h

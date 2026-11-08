@@ -72,9 +72,10 @@ allocate_lxdvm() {
     fi
 
     VM_NAME="${VM_NAME:-spread-${name}-${RANDOM}}"
-    DISK="${DISK:-40}"
+    # Hindsight, MicroK8s and Juju need more than the template default.
+    DISK="${DISK:-60}"
     CPU="${CPU:-4}"
-    MEM="${MEM:-12}"
+    MEM="${MEM:-16}"
 
     lxc launch --vm \
         "${image}" \
