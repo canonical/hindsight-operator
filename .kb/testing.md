@@ -56,4 +56,4 @@ The supported local setup is a throwaway LXD VM with its own MicroK8s controller
 
 ## CI
 
-`.github/workflows/ci.yaml` runs lint and unit tests, packs the charm on amd64 and arm64, and runs `test_embedded.py`, `test_proxy.py`, `test_bank_access.py` and `test_bank_access_scenarios.py` on a MicroK8s controller that `.github/actions/setup-k8s` bootstraps on each runner. The `spread` job runs `spread ci:` on an amd64 runner with the packed charm. `test_postgresql.py` is not run in CI.
+`.github/workflows/ci.yaml` runs lint and unit tests, packs the charm on amd64 and arm64, and runs `test_embedded.py`, `test_proxy.py`, `test_bank_access.py` and `test_bank_access_scenarios.py` on a MicroK8s controller that `.github/actions/setup-k8s` bootstraps on each runner. The `spread` job runs `charmcraft test` on an amd64 runner, which packs the charm and, with `CI` set, runs the suite on the runner itself. `test_postgresql.py` is not run in CI.

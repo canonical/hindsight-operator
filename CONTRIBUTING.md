@@ -77,13 +77,7 @@ pins the revision.
 
 ## Spread
 
-`spread/multitenancy/` demonstrates per-key bank access as a sequence of `curl` tasks against a live deployment, one task per scenario. Run it with `charmcraft test`, which packs the charm and provisions the machine, or on a prepared machine with:
-
-```bash
-CRAFT_ARTIFACT=$PWD/hindsight_amd64.charm spread ci:
-```
-
-CI runs it on amd64.
+`spread/multitenancy/` demonstrates per-key bank access as a sequence of `curl` tasks against a live deployment, one task per scenario. Run it with `charmcraft test`, which packs the charm and runs the suite in a new LXD VM. With `CI` set, it runs the suite on the machine itself, as the `spread` CI job does on amd64.
 
 ## Publishing
 
