@@ -23,18 +23,19 @@ auditor:
 STATE_FILE=/root/hindsight-multitenancy.env
 
 bootstrap_juju_on_microk8s() {
-    if juju show-controller concierge-microk8s >/dev/null 2>&1; then
+    if juju show-controller "${CONTROLLER}" >/dev/null 2>&1; then
         return
     fi
     snap install concierge --classic
     # The same configuration CI uses for the integration tests.
     concierge prepare -c "${PROJECT_PATH}/.github/actions/setup-k8s/concierge.yaml"
+    juju show-controller "${CONTROLLER}" >/dev/null
 }
 
 deploy_hindsight_with_tenants() {
     test -n "${CRAFT_ARTIFACT}" || { echo "CRAFT_ARTIFACT must name the packed charm"; exit 1; }
     image=$(sed -n 's/^ *upstream-source: *//p' "${PROJECT_PATH}/charmcraft.yaml")
-    juju add-model "${MODEL}"
+    juju add-model -c "${CONTROLLER}" "${MODEL#*:}"
     # Juju schedules pods on amd64 nodes unless told otherwise.
     juju set-model-constraints -m "${MODEL}" arch="$(dpkg --print-architecture)"
     # The Juju snap can always read its own directory.
