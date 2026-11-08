@@ -179,13 +179,23 @@ def test_raw_path_is_forwarded_unchanged(gateway, upstream):
     assert upstream.seen[-1].url.raw_path.decode() == "/v1/default/banks/alice-a%20b/memories"
 
 
-def test_mcp_on_a_bank_is_admin_only_for_now(gateway, upstream):
-    """FR-008."""
-    before = len(upstream.seen)
-    for key in ("k-alice", "k-auditor"):
-        assert gateway.post("/mcp/alice-1/", headers=_as(key), json={}).status_code == 403
-    assert len(upstream.seen) == before
-    assert gateway.post("/mcp/alice-1/", headers=_as(ADMIN), json={}).is_success
+def _mcp(tool):
+    return {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool}}
+
+
+def test_mcp_tools_follow_the_key(gateway, upstream):
+    """FR-010."""
+    assert gateway.post("/mcp/alice-1/", headers=_as("k-alice"), json=_mcp("retain")).is_success
+    denied = gateway.post("/mcp/bob-1/", headers=_as("k-auditor"), json=_mcp("retain"))
+    assert denied.status_code == 403
+    assert "read-only" in denied.json()["detail"]
+    allowed = gateway.post("/mcp/bob-1/", headers=_as("k-auditor"), json=_mcp("recall"))
+    assert allowed.status_code == 200
+    # The MCP body is forwarded as sent.
+    assert json.loads(upstream.seen[-1].content) == _mcp("recall")
+    assert (
+        gateway.post("/mcp/bob-1/", headers=_as("k-alice"), json=_mcp("recall")).status_code == 403
+    )
 
 
 def test_refusals_are_logged_without_the_key(gateway, caplog):

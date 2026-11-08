@@ -136,7 +136,9 @@ def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTranspor
             app.state.client = client
             yield
 
-    async def forward(request: HttpRequest, path: str, auth: str | None):
+    async def forward(
+        request: HttpRequest, path: str, auth: str | None, body: bytes | None = None
+    ):
         client: httpx.AsyncClient = request.app.state.client
         # Forward the raw path the policy checked, so the API resolves the same bank.
         query = request.url.query
@@ -144,7 +146,7 @@ def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTranspor
             request.method,
             path + (f"?{query}" if query else ""),
             headers=_forward_headers(request, auth),
-            content=request.stream(),
+            content=body if body is not None else request.stream(),
         )
         response = await client.send(upstream_request, stream=True)
         return _streamed(response)
@@ -190,13 +192,16 @@ def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTranspor
         if caller == "admin":
             return await forward(request, path, auth=policy.admin_key)
 
-        decision = decide(caller, req)
+        body = None
+        if req.kind is Kind.MCP_BANK and request.method == "POST":
+            body = await request.body()
+        decision = decide(caller, req, body)
         if not decision.allowed:
             logger.info("denied %s %s %s: %s", caller.name, request.method, path, decision.reason)
             return _error(decision.status, decision.reason)
         if req.kind is Kind.BANK_LIST:
             return await bank_list(request, caller)
-        return await forward(request, path, auth=policy.admin_key)
+        return await forward(request, path, auth=policy.admin_key, body=body)
 
     routes = [Route("/{path:path}", handle, methods=METHODS)]
     return Starlette(routes=routes, lifespan=lifespan)
