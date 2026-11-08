@@ -21,6 +21,7 @@ unit has used the external database, and whether preparing pg0 failed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -60,6 +61,17 @@ from defaults import (
 from gateway import policy as gateway_policy
 
 logger = logging.getLogger(__name__)
+
+
+_GATEWAY_SOURCE = Path(__file__).parent / "gateway"
+
+
+def _gateway_digest() -> str:
+    """A digest of the gateway's code, which changes when an upgrade brings new code."""
+    digest = hashlib.sha256()
+    for name in GATEWAY_FILES:
+        digest.update((_GATEWAY_SOURCE / name).read_bytes())
+    return digest.hexdigest()[:16]
 
 
 class StatusError(Exception):
@@ -329,10 +341,17 @@ class HindsightCharm(ops.CharmBase):
             )
         keys = self._read_secret("access-keys")
         try:
-            gateway_policy.load_policy(admin_key, keys, json.dumps(access))
+            access_json = json.dumps(access, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            # YAML reads unquoted values such as 2024-01-01 as dates.
+            raise StatusError(
+                ops.BlockedStatus("bank-access: quote client names and bank patterns")
+            ) from exc
+        try:
+            gateway_policy.load_policy(admin_key, keys, access_json)
         except gateway_policy.PolicyError as exc:
             raise StatusError(ops.BlockedStatus(f"bank-access: {exc}")) from exc
-        return hindsight_env.gateway_environment(admin_key, keys, access)
+        return hindsight_env.gateway_environment(admin_key, keys, access_json, _gateway_digest())
 
     def _has_data_storage(self) -> bool:
         """Whether this unit has the `data` volume the embedded database needs."""
@@ -424,11 +443,10 @@ class HindsightCharm(ops.CharmBase):
 
     def _push_gateway(self) -> None:
         """Put the gateway's code, shipped with the charm, into the workload."""
-        source = Path(__file__).parent / "gateway"
         for name in GATEWAY_FILES:
             self.container.push(
                 f"{GATEWAY_DIR}/{name}",
-                (source / name).read_text(),
+                (_GATEWAY_SOURCE / name).read_text(),
                 make_dirs=True,
                 permissions=0o644,
                 user=WORKLOAD_USER,

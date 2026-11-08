@@ -731,6 +731,18 @@ def test_bank_access_puts_the_gateway_in_front_of_the_api(ctx, pg0_mount):
     assert {p.port for p in out.opened_ports} == {8888, 9999}
 
 
+def test_new_gateway_code_restarts_the_gateway(ctx, pg0_mount, monkeypatch):
+    """New gateway code in an upgrade changes its Pebble service, so replan restarts it."""
+    first = ctx.run(ctx.on.config_changed(), _gateway_state(pg0_mount))
+    before = first.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    monkeypatch.setattr(charm_module, "_gateway_digest", lambda: "new-code")
+
+    second = ctx.run(ctx.on.upgrade_charm(), first)
+
+    after = second.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert after["HINDSIGHT_GATEWAY_CODE"] == "new-code" != before["HINDSIGHT_GATEWAY_CODE"]
+
+
 def test_without_bank_access_the_api_serves_directly(ctx, pg0_mount):
     """FR-014."""
     state = _gateway_state(pg0_mount, access="")
@@ -755,6 +767,7 @@ def test_without_bank_access_the_api_serves_directly(ctx, pg0_mount):
         ({"keys": {"alice": "k-alice"}}, "bank-access: auditor: no key"),
         ({"keys": {"alice": "admin-key", "auditor": "k"}}, "admin key"),
         ({"access": "alice: {writes: [x]}"}, "only 'banks' and 'read-banks'"),
+        ({"access": "alice: {banks: [2024-01-01]}"}, "quote client names and bank patterns"),
     ],
 )
 def test_invalid_bank_access_blocks_and_starts_nothing(ctx, pg0_mount, kwargs, message):

@@ -50,8 +50,20 @@ HOP_BY_HOP = frozenset(
         "content-length",
     }
 )
-# Other ways a client might try to present credentials upstream.
-STRIPPED_REQUEST = HOP_BY_HOP | {"authorization", "x-api-key", "cookie"}
+# Other ways a client might try to present credentials upstream, and the
+# forwarding headers that the API trusts from loopback but ignored from the
+# ingress before the gateway was in front of it.
+STRIPPED_REQUEST = (HOP_BY_HOP - {"host"}) | {
+    "authorization",
+    "x-api-key",
+    "cookie",
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-forwarded-proto",
+    "x-real-ip",
+}
 METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # The bank list is filtered here, so fetch it whole from the API.
 _LIST_PAGE = 100_000
@@ -85,12 +97,30 @@ def _response_headers(response: httpx.Response) -> list[tuple[str, str]]:
 
 
 async def _body(response: httpx.Response):
-    """The upstream body as it arrives, or whole if httpx has already read it."""
-    if response.is_stream_consumed:
-        yield response.content
-        return
+    """The upstream body as it arrives, still encoded as the API sent it."""
     async for chunk in response.aiter_raw():
         yield chunk
+
+
+def _streamed(response: httpx.Response) -> StreamingResponse:
+    streamed = StreamingResponse(
+        _body(response),
+        status_code=response.status_code,
+        background=BackgroundTask(response.aclose),
+    )
+    # Raw headers keep repeated ones, such as several Set-Cookie headers.
+    streamed.raw_headers = [
+        (k.encode("latin-1"), v.encode("latin-1")) for k, v in _response_headers(response)
+    ]
+    return streamed
+
+
+def _page_param(params: dict[str, str], name: str, default: int) -> int | None:
+    """A non-negative integer query parameter, as the API accepts it; None if invalid."""
+    value = params.pop(name, None)
+    if value is None:
+        return default
+    return int(value) if value.isascii() and value.isdigit() else None
 
 
 def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTransport | None = None):
@@ -117,26 +147,26 @@ def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTranspor
             content=request.stream(),
         )
         response = await client.send(upstream_request, stream=True)
-        return StreamingResponse(
-            _body(response),
-            status_code=response.status_code,
-            headers=dict(_response_headers(response)),
-            background=BackgroundTask(response.aclose),
-        )
+        return _streamed(response)
 
     async def bank_list(request: HttpRequest, caller: Client) -> Response:
         client: httpx.AsyncClient = request.app.state.client
         params = dict(parse_qsl(request.url.query))
-        limit = int(params.pop("limit", 100) or 100)
-        offset = int(params.pop("offset", 0) or 0)
+        limit = _page_param(params, "limit", 100)
+        offset = _page_param(params, "offset", 0)
+        if limit is None or offset is None:
+            return _error(422, "limit and offset must be non-negative integers")
         params.update(limit=str(_LIST_PAGE), offset="0")
         response = await client.get(
             request.url.path + "?" + urlencode(params),
             headers=_forward_headers(request, policy.admin_key),
         )
         if response.status_code != 200:
+            # httpx has decoded the body, so only its type still applies.
             return Response(
-                response.content, response.status_code, dict(_response_headers(response))
+                response.content,
+                response.status_code,
+                media_type=response.headers.get("content-type"),
             )
         data = response.json()
         banks = [b for b in data.get("banks", []) if visible_bank(caller, str(b.get("bank_id")))]

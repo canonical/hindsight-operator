@@ -26,6 +26,15 @@ ACCESS = {
 BANKS = ["alice-1", "alice-2", "bob-1", "shared", "secret"]
 
 
+def _streamed_json(status: int, body: object, headers: dict[str, str] | None = None):
+    """A response whose body streams, as the real API's does."""
+    return httpx.Response(
+        status,
+        headers={"content-type": "application/json", **(headers or {})},
+        stream=httpx.ByteStream(json.dumps(body).encode()),
+    )
+
+
 class FakeHindsight:
     """Records what reaches the API; answers like Hindsight would."""
 
@@ -35,13 +44,13 @@ class FakeHindsight:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(request)
         if request.headers.get("authorization") not in (None, f"Bearer {ADMIN}"):
-            return httpx.Response(401, json={"detail": "upstream saw a client key"})
+            return _streamed_json(401, {"detail": "upstream saw a client key"})
         if request.url.path == "/v1/default/banks":
             banks = [{"bank_id": b, "name": b} for b in BANKS]
-            return httpx.Response(200, json={"banks": banks, "total": len(banks)})
-        return httpx.Response(
+            return _streamed_json(200, {"banks": banks, "total": len(banks)})
+        return _streamed_json(
             200,
-            json={"path": request.url.raw_path.decode(), "method": request.method},
+            {"path": request.url.raw_path.decode(), "method": request.method},
             headers={"x-upstream": "yes"},
         )
 
@@ -204,3 +213,41 @@ def test_client_compression_preference_is_kept(gateway, upstream):
         "/v1/default/banks/alice-1/memories", headers={**_as("k-alice"), "Accept-Encoding": "gzip"}
     )
     assert upstream.seen[-1].headers["accept-encoding"] == "gzip"
+
+
+def test_the_api_sees_the_clients_host_and_no_forwarding_headers(gateway, upstream):
+    # The API builds absolute URLs, such as redirects, from the Host header.
+    headers = {**_as("k-alice"), "Host": "hindsight.example", "X-Forwarded-For": "6.6.6.6"}
+    gateway.get("/v1/default/banks/alice-1/memories", headers=headers)
+    seen = upstream.seen[-1].headers
+    assert seen["host"] == "hindsight.example"
+    assert "x-forwarded-for" not in seen
+
+
+def test_repeated_response_headers_are_kept(upstream):
+    def two_cookies(request):
+        upstream.seen.append(request)
+        return httpx.Response(
+            200,
+            headers=[("set-cookie", "a=1"), ("set-cookie", "b=2")],
+            stream=httpx.ByteStream(b"{}"),
+        )
+
+    policy = load_policy(ADMIN, KEYS, json.dumps(ACCESS))
+    app = create_app(policy, "http://api.test", transport=httpx.MockTransport(two_cookies))
+    with TestClient(app) as client:
+        response = client.get("/v1/default/banks/alice-1/memories", headers=_as("k-alice"))
+    assert response.headers.get_list("set-cookie") == ["a=1", "b=2"]
+
+
+@pytest.mark.parametrize("query", ["limit=abc", "offset=-1", "limit=1.5"])
+def test_bank_list_rejects_invalid_paging(gateway, query):
+    """FR-003."""
+    response = gateway.get(f"/v1/default/banks?{query}", headers=_as("k-alice"))
+    assert response.status_code == 422
+
+
+def test_bank_list_limit_zero_lists_nothing(gateway):
+    """FR-003."""
+    body = gateway.get("/v1/default/banks?limit=0", headers=_as("k-alice")).json()
+    assert body["banks"] == [] and body["total"] == 3

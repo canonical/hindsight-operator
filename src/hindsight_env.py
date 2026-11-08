@@ -181,12 +181,17 @@ def control_plane_environment(api_env: Mapping[str, str], secret_content: Mappin
 
 
 def gateway_environment(
-    admin_key: str, keys: Mapping[str, str], access: Mapping[str, object]
+    admin_key: str, keys: Mapping[str, str], access_json: str, code_digest: str
 ) -> dict[str, str]:
-    """Environment for the bank-access gateway service."""
+    """Environment for the bank-access gateway service.
+
+    ``code_digest`` identifies the gateway's code, so that Pebble restarts the
+    gateway when a charm upgrade brings new code.
+    """
     return {
         "HINDSIGHT_GATEWAY_UPSTREAM": f"http://127.0.0.1:{API_INTERNAL_PORT}",
         "HINDSIGHT_GATEWAY_ADMIN_KEY": admin_key,
         "HINDSIGHT_GATEWAY_KEYS": json.dumps(dict(keys), sort_keys=True),
-        "HINDSIGHT_GATEWAY_ACCESS": json.dumps(access, sort_keys=True),
+        "HINDSIGHT_GATEWAY_ACCESS": access_json,
+        "HINDSIGHT_GATEWAY_CODE": code_digest,
     }
