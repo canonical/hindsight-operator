@@ -22,7 +22,10 @@ from defaults import (
     CONTROL_PLANE_DIR,
     CONTROL_PLANE_PORT,
     CONTROL_PLANE_SERVICE,
+    GATEWAY_DIR,
+    GATEWAY_SERVICE,
     SERVICE_PATH,
+    UVICORN_BIN,
     WORKLOAD_GROUP,
     WORKLOAD_HOME,
     WORKLOAD_USER,
@@ -44,8 +47,22 @@ def build_layer(
     api_env: Mapping[str, str],
     control_plane_env: Mapping[str, str],
     control_plane_enabled: bool,
+    gateway_env: Mapping[str, str] | None = None,
 ) -> ops.pebble.LayerDict:
-    """Return the Pebble layer for the API and Control Plane services."""
+    """Return the Pebble layer for the API, Control Plane and gateway services.
+
+    The gateway is always defined, so a combined layer cannot keep a stale
+    one. Without ``gateway_env`` it is disabled and only sleeps: Pebble's replan
+    starts a changed service even when it is disabled, and the real gateway
+    would crash without its configuration (failing the replan) or hold the
+    API's port. The charm then stops it.
+    """
+    gateway_command = (
+        f"{UVICORN_BIN} --app-dir {GATEWAY_DIR} --factory app:app_factory"
+        f" --host 0.0.0.0 --port {API_PORT} --no-access-log"
+        if gateway_env
+        else "sleep infinity"
+    )
     return {
         "summary": "Hindsight layer",
         "description": "Pebble layer managed by the hindsight charm",
@@ -72,6 +89,17 @@ def build_layer(
                 "group": WORKLOAD_GROUP,
                 "working-dir": CONTROL_PLANE_DIR,
                 "environment": {**_BASE_ENV, **control_plane_env},
+            },
+            GATEWAY_SERVICE: {
+                "override": "replace",
+                "summary": "Per-key bank access in front of the Hindsight API",
+                "command": gateway_command,
+                "startup": "enabled" if gateway_env else "disabled",
+                "after": [API_SERVICE],
+                "user": WORKLOAD_USER,
+                "group": WORKLOAD_GROUP,
+                "working-dir": GATEWAY_DIR if gateway_env else WORKLOAD_HOME,
+                "environment": {**_BASE_ENV, **(gateway_env or {})},
             },
         },
         "checks": {

@@ -21,14 +21,18 @@ unit has used the external database, and whether preparing pg0 failed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import secrets
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 import ops
+import yaml
 from charms.data_platform_libs.v0.data_interfaces import DatabaseRequires
 from charms.traefik_k8s.v2.ingress import IngressPerAppRequirer
 
@@ -46,13 +50,28 @@ from defaults import (
     DATA_STORAGE,
     DATABASE_NAME,
     DATABASE_RELATION,
+    GATEWAY_DIR,
+    GATEWAY_FILES,
+    GATEWAY_SERVICE,
     INGRESS_RELATION,
     PG0_DATA_DIR,
     WORKLOAD_GROUP,
     WORKLOAD_USER,
 )
+from gateway import policy as gateway_policy
 
 logger = logging.getLogger(__name__)
+
+
+_GATEWAY_SOURCE = Path(__file__).parent / "gateway"
+
+
+def _gateway_digest() -> str:
+    """A digest of the gateway's code, which changes when an upgrade brings new code."""
+    digest = hashlib.sha256()
+    for name in GATEWAY_FILES:
+        digest.update((_GATEWAY_SOURCE / name).read_bytes())
+    return digest.hexdigest()[:16]
 
 
 class StatusError(Exception):
@@ -74,6 +93,8 @@ class DesiredState:
     # Embedded mode with more than one planned unit: this unit keeps serving
     # because its pg0 volume already holds the memories, the others block.
     embedded_scale_out: bool = False
+    # Environment for the bank-access gateway, or None when it is off.
+    gateway_env: dict[str, str] | None = None
 
 
 class HindsightCharm(ops.CharmBase):
@@ -194,11 +215,18 @@ class HindsightCharm(ops.CharmBase):
                 hindsight_env.CP_ACCESS_KEY: self._control_plane_lockout_key(),
             }
             self._stop_services(CONTROL_PLANE_SERVICE)
-        layer = workload.build_layer(state.api_env, control_plane_env, run_control_plane)
+        if state.gateway_env:
+            self._push_gateway()
+        layer = workload.build_layer(
+            state.api_env, control_plane_env, run_control_plane, state.gateway_env
+        )
         self.container.add_layer(CONTAINER, layer, combine=True)
         self.container.replan()
         if not run_control_plane:
             self._stop_services(CONTROL_PLANE_SERVICE)
+        if not state.gateway_env:
+            # Pebble's replan restarts changed services even when disabled.
+            self._stop_services(GATEWAY_SERVICE)
 
         ports = [API_PORT] + ([CONTROL_PLANE_PORT] if run_control_plane else [])
         self.unit.set_ports(*ports)
@@ -240,6 +268,7 @@ class HindsightCharm(ops.CharmBase):
         """Derive the workload configuration, or raise :class:`StatusError`."""
         secret_content = self._secret_content()
         database = self._database_credentials()
+        bank_access = str(self.config.get("bank-access") or "").strip()
 
         api_env = hindsight_env.api_environment(
             llm_provider=str(self.config["llm-provider"]),
@@ -252,7 +281,9 @@ class HindsightCharm(ops.CharmBase):
             secret_content=secret_content,
             database=database,
             proxy_env=hindsight_env.proxy_environment(os.environ),
+            behind_gateway=bool(bank_access),
         )
+        gateway_env = self._gateway_environment(bank_access, api_env) if bank_access else None
 
         embedded = hindsight_env.uses_embedded_database(api_env)
         scale_out = False
@@ -294,7 +325,33 @@ class HindsightCharm(ops.CharmBase):
             control_plane_enabled=bool(self.config["control-plane-enabled"]),
             embedded_database=embedded,
             embedded_scale_out=scale_out,
+            gateway_env=gateway_env,
         )
+
+    def _gateway_environment(self, bank_access: str, api_env: dict[str, str]) -> dict[str, str]:
+        """Validate the per-key bank access settings; raise StatusError if invalid."""
+        try:
+            access = yaml.safe_load(bank_access) or {}
+        except yaml.YAMLError as exc:
+            raise StatusError(ops.BlockedStatus("bank-access is not valid YAML")) from exc
+        admin_key = api_env.get(hindsight_env.TENANT_API_KEY, "")
+        if not admin_key:
+            raise StatusError(
+                ops.BlockedStatus("bank-access needs tenant-api-key in env-secret (the admin key)")
+            )
+        keys = self._read_secret("access-keys")
+        try:
+            access_json = json.dumps(access, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            # YAML reads unquoted values such as 2024-01-01 as dates.
+            raise StatusError(
+                ops.BlockedStatus("bank-access: quote client names and bank patterns")
+            ) from exc
+        try:
+            gateway_policy.load_policy(admin_key, keys, access_json)
+        except gateway_policy.PolicyError as exc:
+            raise StatusError(ops.BlockedStatus(f"bank-access: {exc}")) from exc
+        return hindsight_env.gateway_environment(admin_key, keys, access_json, _gateway_digest())
 
     def _has_data_storage(self) -> bool:
         """Whether this unit has the `data` volume the embedded database needs."""
@@ -332,16 +389,20 @@ class HindsightCharm(ops.CharmBase):
         )
 
     def _secret_content(self) -> dict[str, str]:
-        secret_id = self.config.get("env-secret")
+        return self._read_secret("env-secret")
+
+    def _read_secret(self, option: str) -> dict[str, str]:
+        """Content of the user secret named by a secret-typed config option."""
+        secret_id = self.config.get(option)
         if not secret_id:
             return {}
         try:
             return self.model.get_secret(id=str(secret_id)).get_content(refresh=True)
         except (ops.SecretNotFoundError, ops.ModelError) as exc:
-            logger.warning("Could not read env-secret %s: %s", secret_id, exc)
+            logger.warning("Could not read %s %s: %s", option, secret_id, exc)
             raise StatusError(
                 ops.BlockedStatus(
-                    f"cannot read env-secret: run `juju grant-secret <secret> {self.app.name}`"
+                    f"cannot read {option}: run `juju grant-secret <secret> {self.app.name}`"
                 )
             ) from exc
 
@@ -380,17 +441,31 @@ class HindsightCharm(ops.CharmBase):
             ["chown", "-R", f"{WORKLOAD_USER}:{WORKLOAD_GROUP}", PG0_DATA_DIR]
         ).wait()
 
+    def _push_gateway(self) -> None:
+        """Put the gateway's code, shipped with the charm, into the workload."""
+        for name in GATEWAY_FILES:
+            self.container.push(
+                f"{GATEWAY_DIR}/{name}",
+                (_GATEWAY_SOURCE / name).read_text(),
+                make_dirs=True,
+                permissions=0o644,
+                user=WORKLOAD_USER,
+                group=WORKLOAD_GROUP,
+            )
+
     def _api_crash_looping(self) -> bool:
-        """Whether Pebble is restarting the API after it exited.
+        """Whether Pebble is restarting the API, or the gateway in front of it.
 
         ops has no enum member for Pebble's "backoff", so it passes the raw
         string through.
         """
-        info = self.container.get_services(API_SERVICE).get(API_SERVICE)
-        if info is None:
-            return False
-        current = getattr(info.current, "value", info.current)
-        return current in ("backoff", "error")
+        services = self.container.get_services(API_SERVICE, GATEWAY_SERVICE)
+        for name, info in services.items():
+            if name == GATEWAY_SERVICE and info.startup != ops.pebble.ServiceStartup.ENABLED:
+                continue
+            if getattr(info.current, "value", info.current) in ("backoff", "error"):
+                return True
+        return False
 
     def _stop_services(self, *names: str) -> None:
         services = self.container.get_services(*names)

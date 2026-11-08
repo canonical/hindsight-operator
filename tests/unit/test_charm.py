@@ -18,6 +18,8 @@ from defaults import (
     CONTAINER,
     CONTROL_PLANE_CHECK,
     CONTROL_PLANE_SERVICE,
+    GATEWAY_DIR,
+    GATEWAY_SERVICE,
     PG0_DATA_DIR,
 )
 
@@ -146,7 +148,8 @@ def test_embedded_mode_plans_both_services(ctx, pg0_mount):
     out = ctx.run(ctx.on.pebble_ready(container), state)
 
     plan = out.get_container(CONTAINER).plan
-    assert set(plan.services) == {API_SERVICE, CONTROL_PLANE_SERVICE}
+    assert set(plan.services) == {API_SERVICE, CONTROL_PLANE_SERVICE, GATEWAY_SERVICE}
+    assert plan.services[GATEWAY_SERVICE].startup == "disabled"
     api = plan.services[API_SERVICE]
     assert api.user == "hindsight"
     assert api.command == "/app/api/.venv/bin/hindsight-api"
@@ -531,20 +534,6 @@ def test_crash_looping_api_says_where_to_look(ctx, pg0_mount, api_up):
     assert "pebble logs hindsight-api" in out.unit_status.message
 
 
-def test_relation_removed_without_storage_does_not_suggest_the_action(ctx, pg0_mount):
-    container = _container(pg0_mount)
-    state = _state(
-        containers={container},
-        storages=set(),
-        leader=True,
-        stored_states={_stored(external_database_used=True)},
-    )
-
-    out = ctx.run(ctx.on.update_status(), state)
-
-    assert out.unit_status == BlockedStatus("database relation removed: relate postgresql again")
-
-
 def _cp_ingress_state(pg0_mount, secret_content, *, cp_enabled=True, app_data=None):
     secret = testing.Secret(tracked_content=secret_content)
     relation = testing.Relation(
@@ -617,6 +606,20 @@ def test_api_ingress_is_unaffected_by_control_plane_gating(ctx, pg0_mount):
     assert json.loads(out.get_relation(relation.id).local_app_data["port"]) == 8888
 
 
+def test_relation_removed_without_storage_does_not_suggest_the_action(ctx, pg0_mount):
+    container = _container(pg0_mount)
+    state = _state(
+        containers={container},
+        storages=set(),
+        leader=True,
+        stored_states={_stored(external_database_used=True)},
+    )
+
+    out = ctx.run(ctx.on.update_status(), state)
+
+    assert out.unit_status == BlockedStatus("database relation removed: relate postgresql again")
+
+
 def _cp_running_state(pg0_mount, secret_content, *, related):
     secret = testing.Secret(tracked_content=secret_content)
     relations = (
@@ -673,3 +676,104 @@ def test_control_plane_without_ingress_still_runs_without_key(ctx, pg0_mount):
     container = out.get_container(CONTAINER)
     assert container.service_statuses[CONTROL_PLANE_SERVICE] == pebble.ServiceStatus.ACTIVE
     assert "control plane stopped" not in out.unit_status.message
+
+
+BANK_ACCESS = """
+alice:
+  banks: [alice-*]
+  read-banks: [shared]
+auditor:
+  read-banks: ["*"]
+"""
+
+
+def _gateway_state(pg0_mount, *, env=None, keys=None, access=BANK_ACCESS):
+    env_secret = testing.Secret(tracked_content=env or {"tenant-api-key": "admin-key"})
+    keys_secret = testing.Secret(
+        tracked_content=keys or {"alice": "k-alice", "auditor": "k-auditor"}
+    )
+    return _state(
+        containers={_container(pg0_mount)},
+        secrets={env_secret, keys_secret},
+        leader=True,
+        config={
+            "env-secret": env_secret.id,
+            "access-keys": keys_secret.id,
+            "bank-access": access,
+        },
+    )
+
+
+def test_bank_access_puts_the_gateway_in_front_of_the_api(ctx, pg0_mount):
+    """FR-012, FR-016."""
+    out = ctx.run(ctx.on.config_changed(), _gateway_state(pg0_mount))
+
+    container = out.get_container(CONTAINER)
+    services = container.plan.services
+    api, gateway = services[API_SERVICE].environment, services[GATEWAY_SERVICE]
+    assert (api["HINDSIGHT_API_HOST"], api["HINDSIGHT_API_PORT"]) == ("127.0.0.1", "8890")
+    assert gateway.startup == "enabled"
+    assert "--port 8888" in gateway.command and "app:app_factory" in gateway.command
+    env = gateway.environment
+    assert env["HINDSIGHT_GATEWAY_UPSTREAM"] == "http://127.0.0.1:8890"
+    assert env["HINDSIGHT_GATEWAY_ADMIN_KEY"] == "admin-key"
+    assert json.loads(env["HINDSIGHT_GATEWAY_KEYS"]) == {
+        "alice": "k-alice",
+        "auditor": "k-auditor",
+    }
+    access = json.loads(env["HINDSIGHT_GATEWAY_ACCESS"])
+    assert access["alice"] == {"banks": ["alice-*"], "read-banks": ["shared"]}
+    assert container.service_statuses[GATEWAY_SERVICE] == pebble.ServiceStatus.ACTIVE
+    # The gateway's code, shipped with the charm, is in the workload.
+    fs = container.get_filesystem(ctx)
+    for name in ("app.py", "policy.py"):
+        assert (fs / GATEWAY_DIR.lstrip("/") / name).read_text().startswith("# Copyright")
+    assert {p.port for p in out.opened_ports} == {8888, 9999}
+
+
+def test_new_gateway_code_restarts_the_gateway(ctx, pg0_mount, monkeypatch):
+    """New gateway code in an upgrade changes its Pebble service, so replan restarts it."""
+    first = ctx.run(ctx.on.config_changed(), _gateway_state(pg0_mount))
+    before = first.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    monkeypatch.setattr(charm_module, "_gateway_digest", lambda: "new-code")
+
+    second = ctx.run(ctx.on.upgrade_charm(), first)
+
+    after = second.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert after["HINDSIGHT_GATEWAY_CODE"] == "new-code" != before["HINDSIGHT_GATEWAY_CODE"]
+
+
+def test_without_bank_access_the_api_serves_directly(ctx, pg0_mount):
+    """FR-014."""
+    state = _gateway_state(pg0_mount, access="")
+
+    out = ctx.run(ctx.on.config_changed(), state)
+
+    services = out.get_container(CONTAINER).plan.services
+    api = services[API_SERVICE].environment
+    assert (api["HINDSIGHT_API_HOST"], api["HINDSIGHT_API_PORT"]) == ("0.0.0.0", "8888")
+    assert services[GATEWAY_SERVICE].startup == "disabled"
+    # If Pebble's replan starts it anyway, it holds no port and needs no config.
+    assert services[GATEWAY_SERVICE].command == "sleep infinity"
+    statuses = out.get_container(CONTAINER).service_statuses
+    assert statuses.get(GATEWAY_SERVICE) != pebble.ServiceStatus.ACTIVE
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"access": "alice: [unclosed"}, "bank-access is not valid YAML"),
+        ({"env": {"llm-api-key": "x"}}, "bank-access needs tenant-api-key"),
+        ({"keys": {"alice": "k-alice"}}, "bank-access: auditor: no key"),
+        ({"keys": {"alice": "admin-key", "auditor": "k"}}, "admin key"),
+        ({"access": "alice: {writes: [x]}"}, "only 'banks' and 'read-banks'"),
+        ({"access": "alice: {banks: [2024-01-01]}"}, "quote client names and bank patterns"),
+    ],
+)
+def test_invalid_bank_access_blocks_and_starts_nothing(ctx, pg0_mount, kwargs, message):
+    """FR-013."""
+    out = ctx.run(ctx.on.config_changed(), _gateway_state(pg0_mount, **kwargs))
+
+    assert out.unit_status.name == "blocked"
+    assert message in out.unit_status.message
+    assert API_SERVICE not in out.get_container(CONTAINER).plan.services

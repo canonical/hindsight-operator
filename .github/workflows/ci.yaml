@@ -65,7 +65,10 @@ jobs:
         env:
           JUJU_CONTROLLER: concierge-microk8s
           CHARM_PATH: hindsight_${{ matrix.arch }}.charm
-        run: uv run --group integration pytest tests/integration/test_embedded.py tests/integration/test_proxy.py -v -x --tb=short
+        run: >-
+          uv run --group integration pytest -v -x --tb=short
+          tests/integration/test_embedded.py tests/integration/test_proxy.py
+          tests/integration/test_bank_access.py tests/integration/test_bank_access_scenarios.py
 
   publish:
     needs: [lint-unit, integration]

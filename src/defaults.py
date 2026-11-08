@@ -47,3 +47,11 @@ SERVICE_PATH = "/app/api/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr
 
 # The volume holding the embedded database; optional with an external one.
 DATA_STORAGE = "data"
+
+# Bank-access gateway: per-key bank access in front of the API. When enabled it
+# takes the API's public port and the API moves to a loopback-only port.
+GATEWAY_SERVICE = "hindsight-gateway"
+GATEWAY_DIR = f"{WORKLOAD_HOME}/.hindsight-gateway"
+GATEWAY_FILES = ("app.py", "policy.py")
+API_INTERNAL_PORT = 8890
+UVICORN_BIN = "/app/api/.venv/bin/uvicorn"
