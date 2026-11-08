@@ -1,0 +1,40 @@
+project: hindsight-operator
+
+# Run with `charmcraft test`, which packs the charm, copies it into the
+# project and sets CRAFT_ARTIFACT. It runs the suite in a new LXD VM, or
+# directly on the machine when CI is set (spread/.extension). This file uses
+# charmcraft's test format, which plain spread cannot read.
+backends:
+  craft:
+    type: craft
+    systems:
+      - ubuntu-24.04:
+
+prepare: |
+  # Juju needs the charm etc. to be owned by the running user.
+  chown -R "${USER}" "${PROJECT_PATH}"
+
+suites:
+  spread/multitenancy/:
+    summary: Per-key bank access (multi-tenancy) demonstrated against a live deployment
+    environment:
+      # The model is named with its controller in every command, so the suite
+      # never acts on whichever controller happens to be current.
+      CONTROLLER: concierge-microk8s
+      MODEL: concierge-microk8s:hindsight-multitenancy
+    prepare: |
+      . "${PROJECT_PATH}/spread/lib/hindsight.sh"
+      bootstrap_juju_on_microk8s
+      deploy_hindsight_with_tenants
+    restore: |
+      juju destroy-model --no-prompt --force --destroy-storage --no-wait --timeout=60s \
+        "${MODEL}" || true
+    debug: |
+      juju status -m "${MODEL}" --relations || true
+      juju debug-log -m "${MODEL}" --replay --no-tail --limit 200 || true
+
+exclude:
+  - .git
+  - .venv
+
+kill-timeout: 1h

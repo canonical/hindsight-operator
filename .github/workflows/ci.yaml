@@ -70,6 +70,25 @@ jobs:
           tests/integration/test_embedded.py tests/integration/test_proxy.py
           tests/integration/test_bank_access.py tests/integration/test_bank_access_scenarios.py
 
+  spread:
+    # Demonstrates per-key bank access against a live deployment, task by task.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: canonical/setup-lxd@8c6a87bfb56aa48f3fb9b830baa18562d8bfd4ee # v1
+      - run: sudo snap install charmcraft --classic --channel 4.x/stable
+      - name: Free disk space for the Hindsight image
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Run the multi-tenancy suite
+        env:
+          SPREAD_PASSWORD: ${{ github.run_id }}-spread
+        run: |
+          # Docker on the runner otherwise drops pod traffic.
+          sudo iptables -P FORWARD ACCEPT
+          # With CI set, charmcraft test packs the charm and runs the suite on this runner.
+          charmcraft test -v
+
   publish:
     needs: [lint-unit, integration]
     # main publishes to latest/edge. Any ref can publish to a Charmhub branch

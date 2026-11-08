@@ -1,0 +1,18 @@
+summary: The admin key sees and manages every bank, and only it reaches cross-bank routes
+
+execute: |
+  . "${PROJECT_PATH}/spread/lib/hindsight.sh"
+  load_state
+
+  for bank in alice-notes bob-notes shared private; do
+    banks_of admin | grep -qw "${bank}"
+  done
+  echo "ok: admin lists every bank"
+  expect 200 recall admin private "anything"
+  expect 200 retain admin private "Only the admin can see this."
+
+  # Routes that span banks are admin-only.
+  expect 200 as admin GET /metrics
+  expect 403 as alice GET /metrics
+  expect 403 as alice GET /v1/default/chunks/any-chunk
+  expect 403 as alice GET /v1/default/files/download/any-file
