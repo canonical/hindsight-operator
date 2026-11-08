@@ -7,6 +7,8 @@ dependencies = [
     "ops ~= 3.0",
     # Required by the vendored charms.traefik_k8s.v2.ingress library.
     "pydantic ~= 2.0",
+    # bank-access is YAML.
+    "pyyaml",
 ]
 
 [dependency-groups]
@@ -16,6 +18,9 @@ lint = [
 unit = [
     "pytest",
     "ops[testing] ~= 3.0",
+    # The bank-access gateway runs in the Hindsight image, which provides these.
+    "starlette",
+    "httpx",
 ]
 integration = [
     "pytest",

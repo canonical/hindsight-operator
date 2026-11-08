@@ -53,8 +53,11 @@ def http(
     *,
     port: int = 8888,
     token: str | None = None,
+    accept_sse: bool = False,
 ) -> Response:
     headers = {"Content-Type": "application/json"}
+    if accept_sse:  # MCP's streamable HTTP transport insists on both.
+        headers["Accept"] = "application/json, text/event-stream"
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = {

@@ -9,11 +9,12 @@ straightforward to unit test.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from defaults import API_KEY_TENANT_EXTENSION, API_PORT, CONTROL_PLANE_PORT
+from defaults import API_INTERNAL_PORT, API_KEY_TENANT_EXTENSION, API_PORT, CONTROL_PLANE_PORT
 
 TENANT_API_KEY = "HINDSIGHT_API_TENANT_API_KEY"
 TENANT_EXTENSION = "HINDSIGHT_API_TENANT_EXTENSION"
@@ -106,6 +107,7 @@ def api_environment(
     secret_content: Mapping[str, str],
     database: DatabaseCredentials | None,
     proxy_env: Mapping[str, str] | None = None,
+    behind_gateway: bool = False,
 ) -> dict[str, str]:
     """Build the environment for the ``hindsight-api`` service.
 
@@ -141,8 +143,13 @@ def api_environment(
     # Control Plane settings are not meant for the API process.
     env = {k: v for k, v in env.items() if not k.startswith("HINDSIGHT_CP_")}
 
-    env["HINDSIGHT_API_HOST"] = "0.0.0.0"
-    env["HINDSIGHT_API_PORT"] = str(API_PORT)
+    if behind_gateway:
+        # Only the bank-access gateway, in the same pod, may reach the API.
+        env["HINDSIGHT_API_HOST"] = "127.0.0.1"
+        env["HINDSIGHT_API_PORT"] = str(API_INTERNAL_PORT)
+    else:
+        env["HINDSIGHT_API_HOST"] = "0.0.0.0"
+        env["HINDSIGHT_API_PORT"] = str(API_PORT)
     if database is not None:
         # The relation always wins over a manually supplied URL.
         env[DATABASE_URL] = database.url()
@@ -171,3 +178,15 @@ def control_plane_environment(api_env: Mapping[str, str], secret_content: Mappin
     if api_env.get(TENANT_API_KEY):
         env["HINDSIGHT_CP_DATAPLANE_API_KEY"] = api_env[TENANT_API_KEY]
     return env
+
+
+def gateway_environment(
+    admin_key: str, keys: Mapping[str, str], access: Mapping[str, object]
+) -> dict[str, str]:
+    """Environment for the bank-access gateway service."""
+    return {
+        "HINDSIGHT_GATEWAY_UPSTREAM": f"http://127.0.0.1:{API_INTERNAL_PORT}",
+        "HINDSIGHT_GATEWAY_ADMIN_KEY": admin_key,
+        "HINDSIGHT_GATEWAY_KEYS": json.dumps(dict(keys), sort_keys=True),
+        "HINDSIGHT_GATEWAY_ACCESS": json.dumps(access, sort_keys=True),
+    }

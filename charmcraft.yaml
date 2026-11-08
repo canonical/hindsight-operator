@@ -156,6 +156,31 @@ config:
         Additional non-secret environment for the API, as newline-separated
         KEY=VALUE pairs (e.g. HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai).
         Use `env-secret` for anything sensitive.
+    bank-access:
+      type: string
+      default: ""
+      description: |
+        Per-key access to memory banks, as YAML mapping each client name to the
+        banks it may use. `banks` are read and write; `read-banks` are read
+        only. Names may use shell-style patterns such as `team-a-*`.
+
+          medic-agent:
+            banks: [medic-*]
+            read-banks: [shared]
+          auditor:
+            read-banks: ["*"]
+
+        Each client's API key comes from the `access-keys` secret. When set,
+        a gateway in front of the API checks every request: a key only sees and
+        uses its banks, and anything else is refused. The admin key
+        (`tenant-api-key` in `env-secret`, required) keeps full access, and the
+        Control Plane uses it. Leave empty to turn per-key access off.
+    access-keys:
+      type: secret
+      description: >
+        A Juju user secret mapping each client name in `bank-access` to its
+        API key, for example `medic-agent=<random key>`. Clients send it as
+        `Authorization: Bearer <key>`.
     env-secret:
       type: secret
       description: >
