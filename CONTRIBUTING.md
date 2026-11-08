@@ -67,9 +67,23 @@ memory is shared across units.
 `test_proxy.py` checks with a fake key that LLM traffic follows the model's
 proxy settings; nothing leaves the pod.
 
+`test_bank_access.py` checks per-key bank access on a live unit, and
+`test_bank_access_scenarios.py` tells it as a story of two agents and an
+auditor recalling real memories.
+
 `test_published.py` deploys a Charmhub release instead of a packed charm. It
 is skipped unless `CHARM_CHANNEL` is set; `EXPECTED_CHARM_REVISION` optionally
 pins the revision.
+
+## Spread
+
+`spread/multitenancy/` demonstrates per-key bank access as a sequence of `curl` tasks against a live deployment, one task per scenario. Run it with `charmcraft test`, which packs the charm and provisions the machine, or on a prepared machine with:
+
+```bash
+CRAFT_ARTIFACT=$PWD/hindsight_amd64.charm spread ci:
+```
+
+CI runs it on amd64.
 
 ## Publishing
 

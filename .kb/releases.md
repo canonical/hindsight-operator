@@ -24,7 +24,7 @@ A re-run of `publish` uploads the same files again. Charmhub refuses a duplicate
 
 ## Pipeline
 
-1. `lint-unit`, `build` (amd64 and arm64) and `integration` run on every pull request and push.
+1. `lint-unit`, `build` (amd64 and arm64), `integration` and `spread` run on every pull request and push.
 2. On a push to `main`, `publish` uploads `hindsight_amd64.charm` and `hindsight_arm64.charm`, uploads the multi-arch image named by `upstream-source` as one `hindsight-image` resource revision, and releases both charm revisions to `latest/edge` with it.
 3. `verify-published` deploys the release from Charmhub on both architectures and runs `test_published.py` against the revision `publish` reported.
 
