@@ -141,11 +141,15 @@ def _initialize():
     }
 
 
-def test_mcp_on_a_bank_is_admin_only_for_now(juju: jubilant.Juju):
-    body = _initialize()
-    for key in (KEYS["alice"], ADMIN):
-        response = http(juju, UNIT, "POST", "/mcp/alice-notes/", body, token=key, accept_sse=True)
-        assert response.status == (200 if key == ADMIN else 403), response.body
+def test_mcp_per_bank(juju: jubilant.Juju):
+    def mcp(bank, body, key):
+        return http(juju, UNIT, "POST", f"/mcp/{bank}/", body, token=key, accept_sse=True)
+
+    assert mcp("alice-notes", _initialize(), KEYS["alice"]).status == 200
+    assert mcp("bob-notes", _initialize(), KEYS["alice"]).status == 403
+    retain = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "retain"}}
+    assert mcp("bob-notes", retain, KEYS["auditor"]).status == 403
+    assert http(juju, UNIT, "POST", "/mcp/", _initialize(), token=KEYS["alice"]).status == 403
 
 
 def test_control_plane_still_uses_the_admin_view(juju: jubilant.Juju):

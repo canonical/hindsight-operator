@@ -52,6 +52,20 @@ READ_POSTS = frozenset(
     }
 )
 
+# MCP tools on the single-bank endpoint (/mcp/{bank}/), whose bank comes from
+# the URL. Any other tool, such as list_banks or create_bank, is refused.
+READ_TOOLS = frozenset({"recall", "reflect", "list_mental_models", "get_mental_model"})
+WRITE_TOOLS = frozenset(
+    {
+        "retain",
+        "sync_retain",
+        "create_mental_model",
+        "update_mental_model",
+        "delete_mental_model",
+        "refresh_mental_model",
+    }
+)
+
 _CLIENT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
 
@@ -62,6 +76,7 @@ class Kind(Enum):
     BANK_LIST = "bank-list"
     BANK_READ = "bank-read"
     BANK_WRITE = "bank-write"
+    MCP_BANK = "mcp-bank"
     ADMIN_ONLY = "admin-only"
     INVALID = "invalid"
 
@@ -160,12 +175,31 @@ def classify(method: str, path: str) -> Request:
         bank = _bank_segment(bank_raw)
         if bank is None:
             return Request(Kind.INVALID, reason="invalid bank id")
-        # Per-bank MCP is not yet decided per tool, so it stays admin-only.
-        return Request(Kind.ADMIN_ONLY, reason="MCP is not available to client keys")
+        return Request(Kind.MCP_BANK, bank=bank)
 
     # Everything else: the multi-bank MCP endpoint, chunks and files fetched by
     # id across banks, metrics, templates, and any route added later.
     return Request(Kind.ADMIN_ONLY, reason="not a per-bank route")
+
+
+def mcp_tools_called(body: bytes) -> list[str] | None:
+    """Names of the tools a JSON-RPC message (or batch) calls; None if unreadable."""
+    try:
+        message = json.loads(body or b"null")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    messages = message if isinstance(message, list) else [message]
+    tools: list[str] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            return None
+        if item.get("method") == "tools/call":
+            params = item.get("params")
+            name = params.get("name") if isinstance(params, dict) else None
+            if not isinstance(name, str):
+                return None
+            tools.append(name)
+    return tools
 
 
 @dataclass(frozen=True)
@@ -178,7 +212,7 @@ class Decision:
 ALLOW = Decision(True)
 
 
-def decide(client: Client, request: Request) -> Decision:
+def decide(client: Client, request: Request, mcp_body: bytes | None = None) -> Decision:
     """Whether ``client`` may make ``request``; admins are not passed here."""
     kind, bank = request.kind, request.bank
     if kind is Kind.INVALID:
@@ -195,6 +229,20 @@ def decide(client: Client, request: Request) -> Decision:
         if client.can_read(bank):
             return Decision(False, 403, f"this API key has read-only access to bank {bank!r}")
         return _no_bank(bank)
+    if kind is Kind.MCP_BANK:
+        if not client.can_read(bank):
+            return _no_bank(bank)
+        if mcp_body is None:
+            return ALLOW  # GET (event stream) or DELETE (end of session)
+        tools = mcp_tools_called(mcp_body)
+        if tools is None:
+            return Decision(False, 400, "unreadable MCP request")
+        for tool in tools:
+            if tool in WRITE_TOOLS and not client.can_write(bank):
+                return Decision(False, 403, f"this API key has read-only access to bank {bank!r}")
+            if tool not in READ_TOOLS | WRITE_TOOLS:
+                return Decision(False, 403, f"MCP tool {tool!r} is not available to this key")
+        return ALLOW
     return Decision(False, 403, "this API key cannot use this endpoint")
 
 

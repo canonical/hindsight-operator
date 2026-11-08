@@ -17,6 +17,7 @@ from policy import (  # noqa: E402
     classify,
     decide,
     load_policy,
+    mcp_tools_called,
     visible_bank,
 )
 
@@ -44,8 +45,8 @@ AUDITOR = Client("auditor", "k-auditor", read_banks=("alice-*", "bob-*"))
         ("PATCH", "/v1/default/banks/alice-1/config", Kind.BANK_WRITE, "alice-1"),
         ("DELETE", "/v1/default/banks/alice-1", Kind.BANK_WRITE, "alice-1"),
         ("OPTIONS", "/v1/default/banks/alice-1", Kind.ADMIN_ONLY, None),
-        ("POST", "/mcp/alice-1/", Kind.ADMIN_ONLY, None),
-        ("GET", "/mcp/alice-1", Kind.ADMIN_ONLY, None),
+        ("POST", "/mcp/alice-1/", Kind.MCP_BANK, "alice-1"),
+        ("GET", "/mcp/alice-1", Kind.MCP_BANK, "alice-1"),
         ("POST", "/mcp/", Kind.ADMIN_ONLY, None),
         ("GET", "/v1/default/chunks/abc", Kind.ADMIN_ONLY, None),
         ("GET", "/v1/default/files/download/x", Kind.ADMIN_ONLY, None),
@@ -120,6 +121,42 @@ def test_admin_only_and_invalid_routes_are_refused():
     assert decide(ALICE, classify("GET", "/metrics")).status == 403
     assert decide(ALICE, classify("POST", "/mcp/")).status == 403
     assert decide(ALICE, classify("GET", "/v1/default/banks/a/../b")).status == 400
+
+
+def _call(tool):
+    return json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool}}
+    ).encode()
+
+
+def test_mcp_tools_by_key():
+    """FR-010."""
+    req = classify("POST", "/mcp/alice-1/")
+    assert decide(ALICE, req, _call("retain")).allowed
+    assert decide(ALICE, req, _call("recall")).allowed
+    assert decide(ALICE, req, b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}').allowed
+
+    read_only = classify("POST", "/mcp/bob-1/")
+    assert decide(AUDITOR, read_only, _call("recall")).allowed
+    assert not decide(AUDITOR, read_only, _call("retain")).allowed
+    assert not decide(AUDITOR, read_only, _call("sync_retain")).allowed
+    assert not decide(ALICE, req, _call("list_banks")).allowed
+    assert not decide(ALICE, req, _call("create_bank")).allowed
+    assert not decide(ALICE, classify("POST", "/mcp/bob-1/"), _call("recall")).allowed
+
+
+def test_mcp_batches_and_garbage():
+    """FR-010."""
+    batch = json.dumps(
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "recall"}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "retain"}},
+        ]
+    ).encode()
+    assert mcp_tools_called(batch) == ["recall", "retain"]
+    assert not decide(AUDITOR, classify("POST", "/mcp/bob-1/"), batch).allowed
+    for body in (b"not json", b"[1]", b'{"method":"tools/call","params":{}}'):
+        assert decide(ALICE, classify("POST", "/mcp/alice-1/"), body).status == 400
 
 
 def test_bank_visibility():
