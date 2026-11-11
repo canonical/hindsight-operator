@@ -21,6 +21,10 @@ unit = [
     # The bank-access gateway runs in the Hindsight image, which provides these.
     "starlette",
     "httpx",
+    "pyjwt[crypto]",
+    "asyncpg",
+    # A real PostgreSQL for the grants store's tests, as the image's embedded database.
+    "pg0-embedded",
 ]
 integration = [
     "pytest",

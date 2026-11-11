@@ -726,8 +726,14 @@ def test_bank_access_puts_the_gateway_in_front_of_the_api(ctx, pg0_mount):
     assert container.service_statuses[GATEWAY_SERVICE] == pebble.ServiceStatus.ACTIVE
     # The gateway's code, shipped with the charm, is in the workload.
     fs = container.get_filesystem(ctx)
-    for name in ("app.py", "policy.py"):
+    for name in ("app.py", "grants.py", "identity.py", "policy.py"):
         assert (fs / GATEWAY_DIR.lstrip("/") / name).read_text().startswith("# Copyright")
+    # Every module the gateway imports from its own directory is shipped.
+    shipped = {p.name for p in (fs / GATEWAY_DIR.lstrip("/")).iterdir()}
+    local = {p.stem for p in (Path(charm_module.__file__).parent / "gateway").glob("*.py")}
+    source = (Path(charm_module.__file__).parent / "gateway" / "app.py").read_text()
+    imported = {m for m in local if f"from {m} import" in source}
+    assert {f"{m}.py" for m in imported} <= shipped
     assert {p.port for p in out.opened_ports} == {8888, 9999}
 
 
