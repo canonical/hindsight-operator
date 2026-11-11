@@ -269,6 +269,8 @@ class HindsightCharm(ops.CharmBase):
         secret_content = self._secret_content()
         database = self._database_credentials()
         bank_access = str(self.config.get("bank-access") or "").strip()
+        member_issuer = str(self.config.get("member-issuer") or "").strip()
+        gateway_on = bool(bank_access or member_issuer)
 
         api_env = hindsight_env.api_environment(
             llm_provider=str(self.config["llm-provider"]),
@@ -281,9 +283,11 @@ class HindsightCharm(ops.CharmBase):
             secret_content=secret_content,
             database=database,
             proxy_env=hindsight_env.proxy_environment(os.environ),
-            behind_gateway=bool(bank_access),
+            behind_gateway=gateway_on,
         )
-        gateway_env = self._gateway_environment(bank_access, api_env) if bank_access else None
+        gateway_env = (
+            self._gateway_environment(bank_access, member_issuer, api_env) if gateway_on else None
+        )
 
         embedded = hindsight_env.uses_embedded_database(api_env)
         scale_out = False
@@ -328,18 +332,22 @@ class HindsightCharm(ops.CharmBase):
             gateway_env=gateway_env,
         )
 
-    def _gateway_environment(self, bank_access: str, api_env: dict[str, str]) -> dict[str, str]:
-        """Validate the per-key bank access settings; raise StatusError if invalid."""
+    def _gateway_environment(
+        self, bank_access: str, member_issuer: str, api_env: dict[str, str]
+    ) -> dict[str, str]:
+        """Validate the per-key and member access settings; raise StatusError if invalid."""
         try:
             access = yaml.safe_load(bank_access) or {}
         except yaml.YAMLError as exc:
             raise StatusError(ops.BlockedStatus("bank-access is not valid YAML")) from exc
         admin_key = api_env.get(hindsight_env.TENANT_API_KEY, "")
         if not admin_key:
+            option = "bank-access" if bank_access else "member-issuer"
             raise StatusError(
-                ops.BlockedStatus("bank-access needs tenant-api-key in env-secret (the admin key)")
+                ops.BlockedStatus(f"{option} needs tenant-api-key in env-secret (the admin key)")
             )
-        keys = self._read_secret("access-keys")
+        members = self._member_access(member_issuer) if member_issuer else None
+        keys = self._read_secret("access-keys") if bank_access else {}
         try:
             access_json = json.dumps(access, sort_keys=True)
         except (TypeError, ValueError) as exc:
@@ -348,10 +356,29 @@ class HindsightCharm(ops.CharmBase):
                 ops.BlockedStatus("bank-access: quote client names and bank patterns")
             ) from exc
         try:
-            gateway_policy.load_policy(admin_key, keys, access_json)
+            gateway_policy.load_policy(
+                admin_key, keys, access_json, grants_key=members.grants_key if members else ""
+            )
         except gateway_policy.PolicyError as exc:
-            raise StatusError(ops.BlockedStatus(f"bank-access: {exc}")) from exc
-        return hindsight_env.gateway_environment(admin_key, keys, access_json, _gateway_digest())
+            option = "grants-key" if "grants key" in str(exc) else "bank-access"
+            raise StatusError(ops.BlockedStatus(f"{option}: {exc}")) from exc
+        return hindsight_env.gateway_environment(
+            admin_key, keys, access_json, _gateway_digest(), members=members, api_env=api_env
+        )
+
+    def _member_access(self, issuer: str) -> hindsight_env.MemberAccess:
+        """Validate the member access settings (002 FR-013); raise StatusError if invalid."""
+        audience = str(self.config.get("member-audience") or "").strip()
+        try:
+            gateway_policy.check_member_access(issuer, audience)
+        except gateway_policy.PolicyError as exc:
+            raise StatusError(ops.BlockedStatus(str(exc))) from exc
+        grants_key = self._read_secret("grants-key").get("key", "")
+        if not grants_key:
+            raise StatusError(
+                ops.BlockedStatus("member-issuer needs grants-key: a secret with a `key`")
+            )
+        return hindsight_env.MemberAccess(issuer, audience, grants_key)
 
     def _has_data_storage(self) -> bool:
         """Whether this unit has the `data` volume the embedded database needs."""

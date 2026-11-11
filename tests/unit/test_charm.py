@@ -783,3 +783,100 @@ def test_invalid_bank_access_blocks_and_starts_nothing(ctx, pg0_mount, kwargs, m
     assert out.unit_status.name == "blocked"
     assert message in out.unit_status.message
     assert API_SERVICE not in out.get_container(CONTAINER).plan.services
+
+
+ISSUER = "https://id.example.com"
+
+
+def _member_state(pg0_mount, *, env=None, grants=None, access="", config=None):
+    env_secret = testing.Secret(tracked_content=env or {"tenant-api-key": "admin-key"})
+    grants_secret = testing.Secret(tracked_content=grants or {"key": "grants-key"})
+    keys_secret = testing.Secret(tracked_content={"alice": "k-alice", "auditor": "k-auditor"})
+    options = {
+        "env-secret": env_secret.id,
+        "grants-key": grants_secret.id,
+        "access-keys": keys_secret.id,
+        "bank-access": access,
+        "member-issuer": ISSUER,
+        "member-audience": "hindsight",
+        **(config or {}),
+    }
+    return _state(
+        containers={_container(pg0_mount)},
+        secrets={env_secret, grants_secret, keys_secret},
+        leader=True,
+        config=options,
+    )
+
+
+def test_member_access_alone_puts_the_gateway_in_front_of_the_api(ctx, pg0_mount):
+    """002 FR-012: member access runs the gateway without bank-access."""
+    out = ctx.run(ctx.on.config_changed(), _member_state(pg0_mount))
+
+    container = out.get_container(CONTAINER)
+    services = container.plan.services
+    api, gateway = services[API_SERVICE].environment, services[GATEWAY_SERVICE]
+    assert (api["HINDSIGHT_API_HOST"], api["HINDSIGHT_API_PORT"]) == ("127.0.0.1", "8890")
+    assert gateway.startup == "enabled"
+    env = gateway.environment
+    assert env["HINDSIGHT_GATEWAY_MEMBER_ISSUER"] == ISSUER
+    assert env["HINDSIGHT_GATEWAY_MEMBER_AUDIENCE"] == "hindsight"
+    assert env["HINDSIGHT_GATEWAY_GRANTS_KEY"] == "grants-key"
+    assert json.loads(env["HINDSIGHT_GATEWAY_KEYS"]) == {}
+    # The embedded database: the gateway asks pg0 for its address.
+    assert env["HINDSIGHT_GATEWAY_DATABASE_URL"] == api.get("HINDSIGHT_API_DATABASE_URL", "")
+    assert container.service_statuses[GATEWAY_SERVICE] == pebble.ServiceStatus.ACTIVE
+
+
+def test_member_access_works_alongside_per_key_access(ctx, pg0_mount):
+    out = ctx.run(ctx.on.config_changed(), _member_state(pg0_mount, access=BANK_ACCESS))
+
+    env = out.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert json.loads(env["HINDSIGHT_GATEWAY_KEYS"])["alice"] == "k-alice"
+    assert env["HINDSIGHT_GATEWAY_GRANTS_KEY"] == "grants-key"
+
+
+def test_the_gateway_gets_the_external_database_and_the_proxy(ctx, pg0_mount, monkeypatch):
+    """The gateway keeps grants where the API keeps banks, and reaches the issuer
+    through the model's proxy."""
+    monkeypatch.setenv("JUJU_CHARM_HTTPS_PROXY", "http://proxy.example:3128")
+    env = {"tenant-api-key": "admin-key", "database-url": "postgresql://u:p@db:5432/hs"}
+    out = ctx.run(ctx.on.config_changed(), _member_state(pg0_mount, env=env))
+
+    gateway = out.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert gateway["HINDSIGHT_GATEWAY_DATABASE_URL"] == "postgresql://u:p@db:5432/hs"
+    assert gateway["HTTPS_PROXY"] == gateway["https_proxy"] == "http://proxy.example:3128"
+
+
+def test_clearing_member_issuer_turns_member_access_off(ctx, pg0_mount):
+    """002 FR-014."""
+    state = _member_state(pg0_mount, access=BANK_ACCESS, config={"member-issuer": ""})
+
+    out = ctx.run(ctx.on.config_changed(), state)
+
+    env = out.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert "HINDSIGHT_GATEWAY_MEMBER_ISSUER" not in env
+    assert "HINDSIGHT_GATEWAY_GRANTS_KEY" not in env
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"config": {"member-issuer": "http://id.example.com"}}, "https URL"),
+        ({"config": {"member-audience": ""}}, "needs member-audience"),
+        ({"grants": {"other": "x"}}, "needs grants-key"),
+        ({"grants": {"key": "admin-key"}}, "grants-key: the grants key is the admin key"),
+        (
+            {"grants": {"key": "k-alice"}, "access": BANK_ACCESS},
+            "grants-key: the grants key is the admin key or a client's key",
+        ),
+        ({"env": {"llm-api-key": "x"}}, "member-issuer needs tenant-api-key"),
+    ],
+)
+def test_invalid_member_access_blocks_and_starts_nothing(ctx, pg0_mount, kwargs, message):
+    """002 FR-013."""
+    out = ctx.run(ctx.on.config_changed(), _member_state(pg0_mount, **kwargs))
+
+    assert out.unit_status.name == "blocked"
+    assert message in out.unit_status.message
+    assert API_SERVICE not in out.get_container(CONTAINER).plan.services
