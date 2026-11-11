@@ -36,6 +36,14 @@ While `bank-access` is set, every request on the API's port passes the gateway i
 
 The charm validates `bank-access` with `src/gateway/policy.py`, the same module the gateway enforces. Do not parse or check the configuration a second way.
 
+## §8 - Members are judged as clients are
+
+A member's request is classified by the same `classify` as a client key's, and a member's access is a read-write client's on exactly the banks granted to them, less creating and deleting a bank. Do not add a second classification for members.
+
+## §9 - Grants in their own schema
+
+The gateway keeps grants in the `hindsight_gateway` schema of Hindsight's database and never reads or writes Hindsight's own tables. Bank creation goes through Hindsight's API with the admin key.
+
 
 # Concepts
 
@@ -45,7 +53,7 @@ The charm validates `bank-access` with `src/gateway/policy.py`, the same module 
 - `src/hindsight_env.py`: config, secret and relation data to environment variables for the API and Control Plane.
 - `src/workload.py`: the Pebble layer. Two services, `hindsight-api` and `hindsight-control-plane`, and their checks.
 - `src/defaults.py`: container paths, ports, service, check and relation names.
-- `src/gateway/`: the per-key bank-access gateway, shipped in the charm and pushed into the workload container. `policy.py` is pure: configuration parsing, key identification and request classification. `app.py` is the Starlette proxy.
+- `src/gateway/`: the per-key bank-access gateway, shipped in the charm and pushed into the workload container. `policy.py` is pure: configuration parsing, key identification and request classification. `app.py` is the Starlette proxy. `identity.py` verifies member tokens, and `grants.py` keeps grants in PostgreSQL.
 - `lib/charms/`: vendored charm libraries, `data_platform_libs.v0.data_interfaces` and `traefik_k8s.v2.ingress`. Update them with `charmcraft fetch-libs`, never by hand.
 
 ## Workload
@@ -66,6 +74,7 @@ The charm validates `bank-access` with `src/gateway/policy.py`, the same module 
 - `env-secret` names a Juju secret. Each key becomes an environment variable: `llm-api-key` becomes `HINDSIGHT_API_LLM_API_KEY`. `tenant-api-key` turns on the API-key tenant extension, and `hindsight-cp-access-key` protects the Control Plane.
 - `extra-env` passes other non-secret Hindsight settings.
 - `bank-access` maps client names to `banks` and `read-banks` patterns, and `access-keys` names a Juju secret mapping client names to their keys. Per-key access needs `tenant-api-key` as the admin key.
+- `member-issuer` and `member-audience` turn on member access, and `grants-key` names a Juju secret whose `key` the grants API accepts. Member access needs `tenant-api-key` as the admin key. The gateway runs while either `bank-access` or `member-issuer` is set.
 - `ann-iterative-scan=false` is for pgvector older than 0.8.0.
 
 ## Relations
@@ -82,3 +91,11 @@ The charm validates `bank-access` with `src/gateway/policy.py`, the same module 
 - Hindsight 0.9.2's own per-bank hooks (`validate_bank_read`, `validate_bank_write`) are not called on document export, mental-model history, or imports into an existing bank. The gateway does not rely on them.
 - In Hindsight 0.9.2 a bank's MCP endpoint takes the bank only from its URL, and its tools take no bank argument. The gateway reads an MCP `POST` body to judge each `tools/call`.
 
+## Member bank access
+
+- The gateway first compares the bearer value with the admin key, the grants key and every client key. Only a value that matches none, and has the three dot-separated parts of a JSON Web Token, is verified as a member token.
+- Tokens are verified with PyJWT from the image's venv, against the keys at the `jwks_uri` of `<member-issuer>/.well-known/openid-configuration`, accepting only asymmetric algorithms. The keys are cached for ten minutes, and a token with a key ID the cache does not hold refetches them, at most once a minute.
+- The issuer is reached through the model's proxy, which the charm passes to the gateway as to the API.
+- Grants are one table, `hindsight_gateway.bank_grants (bank_id, email, granted_at)`, which the gateway creates if it is missing. The gateway reads a member's grants on every request, so a change applies at once on every unit.
+- With an external database the gateway connects with the API's `HINDSIGHT_API_DATABASE_URL`. With pg0 it waits for the API to start pg0 and connects to the address pg0 reports.
+- `PUT /admin/banks/<bank>` checks `GET /v1/default/banks/<bank>/profile` and, on 404, calls `PUT /v1/default/banks/<bank>` with the admin key.
