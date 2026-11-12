@@ -56,6 +56,10 @@ charm-libs:
     version: "0"
   - lib: traefik_k8s.ingress
     version: "2"
+  - lib: prometheus_k8s.prometheus_scrape
+    version: "0"
+  - lib: tempo_coordinator_k8s.tracing
+    version: "0"
 
 containers:
   hindsight:
@@ -84,6 +88,12 @@ storage:
     multiple:
       range: 0-1
 
+provides:
+  metrics-endpoint:
+    # The gateway's metrics on port 9464, while bank-access or member-issuer is set.
+    interface: prometheus_scrape
+    optional: true
+
 requires:
   database:
     interface: postgresql_client
@@ -91,6 +101,11 @@ requires:
     optional: true
   ingress:
     interface: ingress
+    limit: 1
+    optional: true
+  tracing:
+    # Where the gateway exports its spans, while bank-access or member-issuer is set.
+    interface: tracing
     limit: 1
     optional: true
   control-plane-ingress:

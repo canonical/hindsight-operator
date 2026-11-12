@@ -9,6 +9,8 @@ dependencies = [
     "pydantic ~= 2.0",
     # bank-access is YAML.
     "pyyaml",
+    # Required by the vendored charms.prometheus_k8s.v0.prometheus_scrape library.
+    "cosl >= 0.0.53",
 ]
 
 [dependency-groups]

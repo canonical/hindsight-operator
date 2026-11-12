@@ -20,6 +20,15 @@ TENANT_API_KEY = "HINDSIGHT_API_TENANT_API_KEY"
 TENANT_EXTENSION = "HINDSIGHT_API_TENANT_EXTENSION"
 CP_ACCESS_KEY = "HINDSIGHT_CP_ACCESS_KEY"
 DATABASE_URL = "HINDSIGHT_API_DATABASE_URL"
+DATABASE_SCHEMA = "HINDSIGHT_API_DATABASE_SCHEMA"
+# Behind the gateway, Hindsight records each LLM call's tokens for the usage
+# metrics (003 FR-008). Hindsight 0.9.2 cuts a call's metadata to the same
+# length as its prompt and output, and the metadata must keep the document ID
+# the gateway attributes the call by (FR-019).
+LLM_TRACE_ENV = {
+    "HINDSIGHT_API_LLM_TRACE_ENABLED": "true",
+    "HINDSIGHT_API_LLM_TRACE_MAX_CHARS": "256",
+}
 PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
 # The image bundles its embedding and reranker models and LiteLLM's price map.
 # Without these, startup calls huggingface.co, and a proxy's refusal is fatal.
@@ -128,6 +137,8 @@ def api_environment(
     }
     if llm_base_url:
         env["HINDSIGHT_API_LLM_BASE_URL"] = llm_base_url
+    if behind_gateway:
+        env.update(LLM_TRACE_ENV)
 
     extra = parse_extra_env(extra_env)
     operator_set = {key.upper() for key in extra}
@@ -188,31 +199,42 @@ def gateway_environment(
     *,
     members: MemberAccess | None = None,
     api_env: Mapping[str, str] | None = None,
+    llm_usage: bool = False,
+    otlp_endpoint: str = "",
 ) -> dict[str, str]:
     """Environment for the bank-access gateway service.
 
     ``code_digest`` identifies the gateway's code, so that Pebble restarts the
-    gateway when a charm upgrade brings new code. With ``members``, the
-    gateway also gets the issuer, the grants key, the API's database URL where
-    grants are kept, and the API's proxy settings to reach the issuer.
+    gateway when a charm upgrade brings new code. The gateway gets the API's
+    database URL and schema, where it keeps grants and the LLM usage totals.
+    ``llm_usage`` is set on the leader, which keeps and serves those totals
+    (003 FR-005). With ``members``, the gateway also gets the issuer, the
+    grants key, and the API's proxy settings to reach the issuer. With
+    ``otlp_endpoint``, it gets the endpoint to export its spans to (003
+    FR-016), and the proxy settings to reach it.
     """
+    api_env = api_env or {}
     env = {
         "HINDSIGHT_GATEWAY_UPSTREAM": f"http://127.0.0.1:{API_INTERNAL_PORT}",
         "HINDSIGHT_GATEWAY_ADMIN_KEY": admin_key,
         "HINDSIGHT_GATEWAY_KEYS": json.dumps(dict(keys), sort_keys=True),
         "HINDSIGHT_GATEWAY_ACCESS": access_json,
         "HINDSIGHT_GATEWAY_CODE": code_digest,
+        "HINDSIGHT_GATEWAY_DATABASE_URL": api_env.get(DATABASE_URL, ""),
+        "HINDSIGHT_GATEWAY_HINDSIGHT_SCHEMA": api_env.get(DATABASE_SCHEMA, "public"),
+        "HINDSIGHT_GATEWAY_LLM_USAGE": "1" if llm_usage else "0",
     }
+    if otlp_endpoint:
+        env["HINDSIGHT_GATEWAY_OTLP_ENDPOINT"] = otlp_endpoint
     if members is not None:
-        api_env = api_env or {}
         env.update(
             {
                 "HINDSIGHT_GATEWAY_MEMBER_ISSUER": members.issuer,
                 "HINDSIGHT_GATEWAY_MEMBER_AUDIENCE": members.audience,
                 "HINDSIGHT_GATEWAY_GRANTS_KEY": members.grants_key,
-                "HINDSIGHT_GATEWAY_DATABASE_URL": api_env.get(DATABASE_URL, ""),
             }
         )
+    if members is not None or otlp_endpoint:
         for name in PROXY_VARS:
             for spelling in (name, name.lower()):
                 if spelling in api_env:

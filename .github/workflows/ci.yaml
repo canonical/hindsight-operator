@@ -69,6 +69,7 @@ jobs:
           uv run --group integration pytest -v -x --tb=short
           tests/integration/test_embedded.py tests/integration/test_proxy.py
           tests/integration/test_bank_access.py tests/integration/test_bank_access_scenarios.py
+          tests/integration/test_usage_metrics.py
 
   spread:
     # Demonstrates per-key bank access against a live deployment, task by task.

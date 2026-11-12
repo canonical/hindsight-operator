@@ -742,7 +742,8 @@ def test_bank_access_puts_the_gateway_in_front_of_the_api(ctx, pg0_mount):
     }
     imported |= {"app"}
     assert {f"{m}.py" for m in imported} <= shipped
-    assert {p.port for p in out.opened_ports} == {8888, 9999}
+    # 003 FR-011: the metrics port, for Prometheus to scrape the unit.
+    assert {p.port for p in out.opened_ports} == {8888, 9999, 9464}
 
 
 def test_new_gateway_code_restarts_the_gateway(ctx, pg0_mount, monkeypatch):
@@ -888,3 +889,125 @@ def test_invalid_member_access_blocks_and_starts_nothing(ctx, pg0_mount, kwargs,
     assert out.unit_status.name == "blocked"
     assert message in out.unit_status.message
     assert API_SERVICE not in out.get_container(CONTAINER).plan.services
+
+
+# ---- Usage metrics (003) ------------------------------------------------------
+
+
+def _scrape_jobs(out, relation):
+    data = out.get_relation(relation.id).local_app_data
+    return json.loads(data["scrape_jobs"]) if "scrape_jobs" in data else None
+
+
+def test_the_gateway_is_scraped_on_its_metrics_port(ctx, pg0_mount):
+    """003 FR-011, SC-003."""
+    relation = testing.Relation("metrics-endpoint", remote_app_name="prometheus")
+    state = dataclasses.replace(_gateway_state(pg0_mount), relations={relation})
+
+    out = ctx.run(ctx.on.relation_joined(relation), state)
+
+    jobs = _scrape_jobs(out, relation)
+    assert [t for job in jobs for c in job["static_configs"] for t in c["targets"]] == ["*:9464"]
+    assert jobs[0]["metrics_path"] == "/metrics"
+    assert out.get_relation(relation.id).local_unit_data["prometheus_scrape_unit_address"]
+
+
+def test_without_the_gateway_no_scrape_job_is_published(ctx, pg0_mount):
+    """003 FR-011, SC-003: a job published while the gateway ran is withdrawn."""
+    relation = testing.Relation(
+        "metrics-endpoint",
+        remote_app_name="prometheus",
+        local_app_data={"scrape_jobs": json.dumps([{"static_configs": []}])},
+        local_unit_data={"prometheus_scrape_unit_address": "10.1.2.3"},
+    )
+    state = dataclasses.replace(_gateway_state(pg0_mount, access=""), relations={relation})
+
+    out = ctx.run(ctx.on.config_changed(), state)
+
+    assert GATEWAY_SERVICE not in [
+        n
+        for n, s in out.get_container(CONTAINER).service_statuses.items()
+        if s == pebble.ServiceStatus.ACTIVE
+    ]
+    assert _scrape_jobs(out, relation) is None
+    assert out.get_relation(relation.id).local_unit_data == {}
+    assert 9464 not in {p.port for p in out.opened_ports}
+
+
+@pytest.mark.parametrize(("leader", "flag"), [(True, "1"), (False, "0")])
+def test_only_the_leader_keeps_the_llm_usage(ctx, pg0_mount, leader, flag):
+    """003 FR-005: one unit sweeps and serves the totals."""
+    state = dataclasses.replace(_gateway_state(pg0_mount), leader=leader)
+
+    out = ctx.run(ctx.on.config_changed(), state)
+
+    env = out.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert env["HINDSIGHT_GATEWAY_LLM_USAGE"] == flag
+    # Without member access too, the gateway reaches Hindsight's database.
+    assert env["HINDSIGHT_GATEWAY_DATABASE_URL"] == ""
+    assert env["HINDSIGHT_GATEWAY_HINDSIGHT_SCHEMA"] == "public"
+
+
+def test_update_status_moves_the_llm_usage_off_a_former_leader(ctx, pg0_mount):
+    """003 FR-005, FR-006."""
+    state = ctx.run(ctx.on.config_changed(), _gateway_state(pg0_mount))
+    state = dataclasses.replace(state, leader=False)
+
+    out = ctx.run(ctx.on.update_status(), state)
+
+    env = out.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert env["HINDSIGHT_GATEWAY_LLM_USAGE"] == "0"
+
+
+def test_behind_the_gateway_hindsight_records_tokens_without_prompts(ctx, pg0_mount):
+    """003 FR-008."""
+    out = ctx.run(ctx.on.config_changed(), _gateway_state(pg0_mount))
+
+    api = _api_env(out)
+    assert api["HINDSIGHT_API_LLM_TRACE_ENABLED"] == "true"
+    assert api["HINDSIGHT_API_LLM_TRACE_MAX_CHARS"] == "256"
+
+
+def _tracing(**kwargs):
+    receivers = [{"protocol": {"name": "otlp_http", "type": "http"}, "url": "http://tempo:4318"}]
+    return testing.Relation(
+        "tracing",
+        remote_app_name="tempo",
+        remote_app_data={"receivers": json.dumps(receivers)},
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("leader", [True, False])
+def test_the_gateway_exports_spans_to_the_tracing_endpoint(ctx, pg0_mount, leader):
+    """003 FR-016, FR-017, SC-005."""
+    relation = _tracing()
+    state = dataclasses.replace(_gateway_state(pg0_mount), relations={relation}, leader=leader)
+
+    out = ctx.run(ctx.on.relation_changed(relation), state)
+
+    env = out.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert env["HINDSIGHT_GATEWAY_OTLP_ENDPOINT"] == "http://tempo:4318"
+    if leader:
+        requested = out.get_relation(relation.id).local_app_data["receivers"]
+        assert json.loads(requested) == ["otlp_http"]
+    # Hindsight's own trace export, which records prompts, stays off.
+    assert not [name for name in _api_env(out) if name.startswith("HINDSIGHT_API_OTEL_")]
+
+
+def test_without_a_tracing_endpoint_no_spans_are_exported(ctx, pg0_mount):
+    """003 FR-016, SC-005: before Tempo answers, and once the relation is gone."""
+    waiting = testing.Relation("tracing", remote_app_name="tempo")
+    state = dataclasses.replace(_gateway_state(pg0_mount), relations={waiting})
+    out = ctx.run(ctx.on.relation_changed(waiting), state)
+    env = out.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert "HINDSIGHT_GATEWAY_OTLP_ENDPOINT" not in env
+
+    relation = _tracing()
+    state = dataclasses.replace(_gateway_state(pg0_mount), relations={relation})
+    state = ctx.run(ctx.on.relation_changed(relation), state)
+    env = state.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert env["HINDSIGHT_GATEWAY_OTLP_ENDPOINT"] == "http://tempo:4318"
+    out = ctx.run(ctx.on.relation_broken(state.get_relation(relation.id)), state)
+    env = out.get_container(CONTAINER).plan.services[GATEWAY_SERVICE].environment
+    assert "HINDSIGHT_GATEWAY_OTLP_ENDPOINT" not in env
