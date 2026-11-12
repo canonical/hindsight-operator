@@ -731,8 +731,16 @@ def test_bank_access_puts_the_gateway_in_front_of_the_api(ctx, pg0_mount):
     # Every module the gateway imports from its own directory is shipped.
     shipped = {p.name for p in (fs / GATEWAY_DIR.lstrip("/")).iterdir()}
     local = {p.stem for p in (Path(charm_module.__file__).parent / "gateway").glob("*.py")}
-    source = (Path(charm_module.__file__).parent / "gateway" / "app.py").read_text()
-    imported = {m for m in local if f"from {m} import" in source}
+    sources = [
+        p.read_text() for p in (Path(charm_module.__file__).parent / "gateway").glob("*.py")
+    ]
+    imported = {
+        m
+        for m in local
+        for source in sources
+        if f"from {m} import" in source or f"\nimport {m}\n" in source
+    }
+    imported |= {"app"}
     assert {f"{m}.py" for m in imported} <= shipped
     assert {p.port for p in out.opened_ports} == {8888, 9999}
 
