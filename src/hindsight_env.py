@@ -181,17 +181,49 @@ def control_plane_environment(api_env: Mapping[str, str], secret_content: Mappin
 
 
 def gateway_environment(
-    admin_key: str, keys: Mapping[str, str], access_json: str, code_digest: str
+    admin_key: str,
+    keys: Mapping[str, str],
+    access_json: str,
+    code_digest: str,
+    *,
+    members: MemberAccess | None = None,
+    api_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Environment for the bank-access gateway service.
 
     ``code_digest`` identifies the gateway's code, so that Pebble restarts the
-    gateway when a charm upgrade brings new code.
+    gateway when a charm upgrade brings new code. With ``members``, the
+    gateway also gets the issuer, the grants key, the API's database URL where
+    grants are kept, and the API's proxy settings to reach the issuer.
     """
-    return {
+    env = {
         "HINDSIGHT_GATEWAY_UPSTREAM": f"http://127.0.0.1:{API_INTERNAL_PORT}",
         "HINDSIGHT_GATEWAY_ADMIN_KEY": admin_key,
         "HINDSIGHT_GATEWAY_KEYS": json.dumps(dict(keys), sort_keys=True),
         "HINDSIGHT_GATEWAY_ACCESS": access_json,
         "HINDSIGHT_GATEWAY_CODE": code_digest,
     }
+    if members is not None:
+        api_env = api_env or {}
+        env.update(
+            {
+                "HINDSIGHT_GATEWAY_MEMBER_ISSUER": members.issuer,
+                "HINDSIGHT_GATEWAY_MEMBER_AUDIENCE": members.audience,
+                "HINDSIGHT_GATEWAY_GRANTS_KEY": members.grants_key,
+                "HINDSIGHT_GATEWAY_DATABASE_URL": api_env.get(DATABASE_URL, ""),
+            }
+        )
+        for name in PROXY_VARS:
+            for spelling in (name, name.lower()):
+                if spelling in api_env:
+                    env[spelling] = api_env[spelling]
+    return env
+
+
+@dataclass(frozen=True)
+class MemberAccess:
+    """Member access settings (002): the issuer, the audience and the grants key."""
+
+    issuer: str
+    audience: str
+    grants_key: str

@@ -181,6 +181,29 @@ config:
         A Juju user secret mapping each client name in `bank-access` to its
         API key, for example `medic-agent=<random key>`. Clients send it as
         `Authorization: Bearer <key>`.
+    member-issuer:
+      type: string
+      default: ""
+      description: >
+        The OpenID Connect issuer whose tokens identify members, as an https
+        URL, for example `https://identity.example.com`. When set, a person
+        reaches the banks granted to the `email` claim of their token, and the
+        grants API at `/admin/banks/` creates banks and grants them. Needs
+        `member-audience`, `grants-key` and `tenant-api-key` in `env-secret`.
+        Leave empty to turn member access off. Grants are kept.
+    member-audience:
+      type: string
+      default: ""
+      description: >
+        The audience (`aud`) a member's token must be issued for, such as the
+        client ID the identity provider gave this deployment.
+    grants-key:
+      type: secret
+      description: >
+        A Juju user secret whose `key` is the key the grants API accepts, for
+        example `key=<random key>`. The provisioning system sends it as
+        `Authorization: Bearer <key>`. It reaches the grants API and nothing
+        else.
     env-secret:
       type: secret
       description: >
