@@ -111,6 +111,37 @@ Anything the charm does not recognise as an operation on one bank is refused to 
 
 An invalid `bank-access`, a client without a key, or a missing admin key blocks the unit with a message. Clear `bank-access` to turn the feature off: the API then accepts only the admin key.
 
+## Member bank access
+
+Let people reach the banks granted to their email with a token from your identity provider, and let a provisioning system grant and withdraw those banks. Put the key the provisioning system uses in a secret, and name your OpenID Connect issuer and the audience its tokens are issued for:
+
+```shell
+juju add-secret hindsight-grants-key key=$(openssl rand -hex 32)
+juju grant-secret hindsight-grants-key hindsight
+juju config hindsight grants-key=secret:<id> \
+  member-issuer=https://identity.example.com \
+  member-audience=hindsight
+```
+
+Member access needs the admin key (`tenant-api-key` in `env-secret`), as per-key access does, and works alongside it.
+
+A member sends their token as `Authorization: Bearer <token>`. The gateway checks its signature against the issuer's published keys, its issuer, audience and expiry, and reads the person's `email` claim. A member then:
+
+- lists, recalls from, reflects on, stores in and changes only the banks granted to their email
+- gets on `/mcp/<bank>/` the bank's read and write MCP tools, on a granted bank only
+- cannot create or delete a bank, or reach anything that spans banks
+
+The provisioning system sends the grants key as `Authorization: Bearer <key>` to the grants API. The key reaches nothing else, so it cannot read memories:
+
+| Request | Effect |
+|---|---|
+| `PUT /admin/banks/<bank>` | creates the bank if it does not exist |
+| `GET /admin/banks/<bank>/grants` | lists the emails granted the bank, as `{"grants": [...]}`, or 404 if there is no such bank |
+| `PUT /admin/banks/<bank>/grants/<email>` | grants the bank to the email, or 404 if there is no such bank |
+| `DELETE /admin/banks/<bank>/grants/<email>` | withdraws the grant, or 404 if there is none |
+
+A grant applies to the member's next request on every unit. Grants are kept in Hindsight's database, in a `hindsight_gateway` schema of their own, so they are shared by every unit and kept when member access is turned off. Clear `member-issuer` to turn member access off.
+
 ## Security
 
 Without `tenant-api-key`, the API accepts unauthenticated requests from anything that can reach it. Set a tenant key before exposing the API.

@@ -24,7 +24,7 @@ Run `tox -e lint,unit` before opening or updating a pull request. CI runs the sa
 
 ## Unit tests
 
-`tests/unit/` uses `ops.testing` (Scenario) for state transitions in `test_charm.py` and plain pytest for the pure functions in `test_hindsight_env.py`.
+`tests/unit/` uses `ops.testing` (Scenario) for state transitions in `test_charm.py` and plain pytest for the pure functions in `test_hindsight_env.py`. The gateway's tests run it in front of a fake Hindsight API: `test_gateway_members.py` signs member tokens with a fake OpenID Connect issuer, and `test_gateway_grants.py` keeps grants in a real PostgreSQL that `pg0-embedded` starts, as the image's embedded database does.
 
 ```bash
 tox -e format,lint,unit
