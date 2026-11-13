@@ -52,6 +52,6 @@ DATA_STORAGE = "data"
 # takes the API's public port and the API moves to a loopback-only port.
 GATEWAY_SERVICE = "hindsight-gateway"
 GATEWAY_DIR = f"{WORKLOAD_HOME}/.hindsight-gateway"
-GATEWAY_FILES = ("app.py", "policy.py")
+GATEWAY_FILES = ("app.py", "grants.py", "identity.py", "policy.py")
 API_INTERNAL_PORT = 8890
 UVICORN_BIN = "/app/api/.venv/bin/uvicorn"

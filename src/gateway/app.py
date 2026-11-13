@@ -13,6 +13,10 @@ Configuration, from the environment the charm sets:
 - ``HINDSIGHT_GATEWAY_ADMIN_KEY``: the admin (tenant) key, full access.
 - ``HINDSIGHT_GATEWAY_KEYS``: JSON mapping client names to their keys.
 - ``HINDSIGHT_GATEWAY_ACCESS``: JSON mapping client names to their banks.
+- ``HINDSIGHT_GATEWAY_GRANTS_KEY``: the key that reaches only the grants API.
+- ``HINDSIGHT_GATEWAY_MEMBER_ISSUER`` and ``HINDSIGHT_GATEWAY_MEMBER_AUDIENCE``:
+  member access, on when both are set (002).
+- ``HINDSIGHT_GATEWAY_DATABASE_URL``: the API's database URL, where grants are kept.
 
 Runs inside the Hindsight image (Python 3.11), on its own Starlette and httpx.
 """
@@ -23,10 +27,25 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from urllib.parse import parse_qsl, urlencode
+from urllib.parse import parse_qsl, quote, urlencode
 
 import httpx
-from policy import Client, Kind, Policy, classify, decide, load_policy, visible_bank
+from grants import GrantsUnavailableError, PostgresGrants
+from identity import IdentityError, MemberVerifier, looks_like_token
+from policy import (
+    ADMIN_PREFIX,
+    Client,
+    GrantsRoute,
+    Kind,
+    Member,
+    Policy,
+    check_member_access,
+    classify,
+    decide,
+    grants_route,
+    load_policy,
+    visible_bank,
+)
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
 from starlette.requests import Request as HttpRequest
@@ -123,18 +142,43 @@ def _page_param(params: dict[str, str], name: str, default: int) -> int | None:
     return int(value) if value.isascii() and value.isdigit() else None
 
 
-def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTransport | None = None):
-    """Build the gateway app; ``transport`` lets tests stand in for the API."""
+def create_app(
+    policy: Policy,
+    upstream: str,
+    transport: httpx.AsyncBaseTransport | None = None,
+    *,
+    member_issuer: str = "",
+    member_audience: str = "",
+    grants=None,
+    issuer_transport: httpx.AsyncBaseTransport | None = None,
+):
+    """Build the gateway app; the transports let tests stand in for the API and the issuer.
+
+    Member access is on when ``member_issuer`` is set. ``grants`` then holds
+    the grants (:mod:`grants`).
+    """
+    members_on = bool(member_issuer)
 
     @asynccontextmanager
     async def lifespan(app):
-        async with httpx.AsyncClient(
-            base_url=upstream,
-            transport=transport,
-            timeout=httpx.Timeout(connect=10.0, read=None, write=None, pool=None),
-        ) as client:
+        async with (
+            httpx.AsyncClient(
+                base_url=upstream,
+                transport=transport,
+                timeout=httpx.Timeout(connect=10.0, read=None, write=None, pool=None),
+            ) as client,
+            # The issuer is outside the pod: reached through the model's proxy.
+            httpx.AsyncClient(transport=issuer_transport, timeout=10.0, trust_env=True) as issuer,
+        ):
             app.state.client = client
-            yield
+            app.state.verifier = (
+                MemberVerifier(member_issuer, member_audience, issuer) if members_on else None
+            )
+            try:
+                yield
+            finally:
+                if grants is not None:
+                    await grants.close()
 
     async def forward(
         request: HttpRequest, path: str, auth: str | None, body: bytes | None = None
@@ -151,7 +195,68 @@ def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTranspor
         response = await client.send(upstream_request, stream=True)
         return _streamed(response)
 
-    async def bank_list(request: HttpRequest, caller: Client) -> Response:
+    async def bank_exists(request: HttpRequest, quoted: str) -> bool | Response:
+        client: httpx.AsyncClient = request.app.state.client
+        response = await client.get(
+            f"/v1/default/banks/{quoted}/profile",
+            headers=[("authorization", f"Bearer {policy.admin_key}")],
+        )
+        if response.status_code == 200:
+            return True
+        if response.status_code == 404:
+            return False
+        return _error(502, f"Hindsight answered {response.status_code} for the bank")
+
+    async def grants_api(request: HttpRequest, path: str) -> Response:
+        route = grants_route(request.method, path)
+        if not isinstance(route, GrantsRoute):
+            return _error(route.status, route.reason)
+        quoted = quote(route.bank, safe="")
+        try:
+            if route.action == "grant" and request.method == "DELETE":
+                if await grants.withdraw(route.bank, route.email):
+                    return Response(status_code=204)
+                return _error(404, "no such grant")
+            exists = await bank_exists(request, quoted)
+            if isinstance(exists, Response):
+                return exists
+            if route.action == "bank":
+                if exists:
+                    return JSONResponse({"bank_id": route.bank})
+                client: httpx.AsyncClient = request.app.state.client
+                created = await client.put(
+                    f"/v1/default/banks/{quoted}",
+                    json={},
+                    headers=[("authorization", f"Bearer {policy.admin_key}")],
+                )
+                if created.status_code >= 300:
+                    return _error(
+                        502, f"Hindsight refused to create the bank: {created.status_code}"
+                    )
+                return JSONResponse({"bank_id": route.bank}, status_code=201)
+            if not exists:
+                return _error(404, "no such bank")
+            if route.action == "grants":
+                return JSONResponse({"grants": await grants.emails(route.bank)})
+            await grants.grant(route.bank, route.email)
+            return JSONResponse({"bank_id": route.bank, "email": route.email})
+        except GrantsUnavailableError:
+            return _error(503, "grants are unavailable")
+
+    async def member(request: HttpRequest, token: str) -> Member | Response:
+        try:
+            email = await request.app.state.verifier.email(token)
+        except IdentityError as exc:
+            if exc.status == 503:
+                logger.warning("member token not checked: %s", exc.reason)
+                return _error(503, exc.reason)
+            return _error(401, f"Authentication failed: {exc.reason}")
+        try:
+            return Member(email, await grants.banks_for(email))
+        except GrantsUnavailableError:
+            return _error(503, "grants are unavailable")
+
+    async def bank_list(request: HttpRequest, caller: Client | Member) -> Response:
         client: httpx.AsyncClient = request.app.state.client
         params = dict(parse_qsl(request.url.query))
         limit = _page_param(params, "limit", 100)
@@ -184,9 +289,20 @@ def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTranspor
         if req.kind is Kind.INVALID:
             return _error(400, req.reason)
 
-        caller = policy.identify(_token(request))
+        token = _token(request)
+        caller = policy.identify(token)
         if req.kind is Kind.PUBLIC:
             return await forward(request, path, auth=None)
+        if members_on and path.startswith(ADMIN_PREFIX):
+            if caller in ("admin", "grants"):
+                return await grants_api(request, path)
+            return _error(401 if caller is None else 403, "only the grants key may use this API")
+        if caller == "grants":
+            return _error(403, "the grants key can only use the grants API")
+        if caller is None and members_on and token and looks_like_token(token):
+            caller = await member(request, token)
+            if isinstance(caller, Response):
+                return caller
         if caller is None:
             return _error(401, "Authentication failed: Invalid API key")
         if caller == "admin":
@@ -208,14 +324,32 @@ def create_app(policy: Policy, upstream: str, transport: httpx.AsyncBaseTranspor
 
 
 def _from_environment():
+    issuer = os.environ.get("HINDSIGHT_GATEWAY_MEMBER_ISSUER", "")
+    audience = os.environ.get("HINDSIGHT_GATEWAY_MEMBER_AUDIENCE", "")
+    if issuer:
+        check_member_access(issuer, audience)
     policy = load_policy(
         os.environ["HINDSIGHT_GATEWAY_ADMIN_KEY"],
         json.loads(os.environ.get("HINDSIGHT_GATEWAY_KEYS") or "{}"),
         os.environ.get("HINDSIGHT_GATEWAY_ACCESS") or "{}",
+        grants_key=os.environ.get("HINDSIGHT_GATEWAY_GRANTS_KEY", "") if issuer else "",
     )
     logging.basicConfig(level=logging.INFO)
-    logger.info("bank-access gateway: %d client key(s)", len(policy.clients))
-    return create_app(policy, os.environ["HINDSIGHT_GATEWAY_UPSTREAM"])
+    logger.info(
+        "bank-access gateway: %d client key(s), member access %s",
+        len(policy.clients),
+        "on" if issuer else "off",
+    )
+    grants = (
+        PostgresGrants(os.environ.get("HINDSIGHT_GATEWAY_DATABASE_URL", "")) if issuer else None
+    )
+    return create_app(
+        policy,
+        os.environ["HINDSIGHT_GATEWAY_UPSTREAM"],
+        member_issuer=issuer,
+        member_audience=audience,
+        grants=grants,
+    )
 
 
 def app_factory():

@@ -91,6 +91,8 @@ class Request:
     kind: Kind
     bank: str | None = None
     reason: str = ""
+    # A DELETE of the bank itself, not of something in it.
+    deletes_bank: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,15 +111,35 @@ class Client:
         return self.can_write(bank) or _matches(bank, self.read_banks)
 
 
+@dataclass(frozen=True)
+class Member:
+    """A person, by the email their token names, and the banks granted to it.
+
+    A member has a read-write client's access to exactly its granted banks
+    (architecture.md§8), less deleting a bank, which :func:`decide` refuses.
+    """
+
+    name: str  # the email, as the refusal log names a client
+    granted: frozenset[str] = frozenset()
+
+    def can_write(self, bank: str) -> bool:
+        return bank in self.granted
+
+    def can_read(self, bank: str) -> bool:
+        return bank in self.granted
+
+
 @dataclass
 class Policy:
     """Every key the gateway accepts."""
 
     admin_key: str
     clients: tuple[Client, ...] = field(default_factory=tuple)
+    # The key that reaches only the grants API; empty while member access is off.
+    grants_key: str = ""
 
     def identify(self, token: str | None) -> Client | str | None:
-        """Return ``"admin"``, the matching :class:`Client`, or None.
+        """Return ``"admin"``, ``"grants"``, the matching :class:`Client`, or None.
 
         Compares against every key in constant time, so timing does not reveal
         which key a guess is close to.
@@ -127,6 +149,12 @@ class Policy:
         found: Client | str | None = None
         if hmac.compare_digest(token.encode(), self.admin_key.encode()):
             found = "admin"
+        if (
+            self.grants_key
+            and hmac.compare_digest(token.encode(), self.grants_key.encode())
+            and found is None
+        ):
+            found = "grants"
         for client in self.clients:
             if hmac.compare_digest(token.encode(), client.key.encode()) and found is None:
                 found = client
@@ -170,7 +198,9 @@ def classify(method: str, path: str) -> Request:
         if method in {"GET", "HEAD"} or (method == "POST" and rest in READ_POSTS):
             return Request(Kind.BANK_READ, bank=bank)
         if method in {"POST", "PUT", "PATCH", "DELETE"}:
-            return Request(Kind.BANK_WRITE, bank=bank)
+            return Request(
+                Kind.BANK_WRITE, bank=bank, deletes_bank=method == "DELETE" and not rest
+            )
         return Request(Kind.ADMIN_ONLY, reason=f"method {method} on a bank")
 
     if path.startswith(_MCP_PREFIX) and path != _MCP_PREFIX:
@@ -218,11 +248,13 @@ class Decision:
 ALLOW = Decision(True)
 
 
-def decide(client: Client, request: Request, mcp_body: bytes | None = None) -> Decision:
+def decide(client: Client | Member, request: Request, mcp_body: bytes | None = None) -> Decision:
     """Whether ``client`` may make ``request``; admins are not passed here."""
     kind, bank = request.kind, request.bank
     if kind is Kind.INVALID:
         return Decision(False, 400, request.reason)
+    if isinstance(client, Member) and request.deletes_bank:
+        return Decision(False, 403, "a member cannot delete a bank")
     if kind in {Kind.PUBLIC, Kind.BANK_LIST}:
         return ALLOW  # the gateway filters the list itself
     if kind is Kind.ADMIN_ONLY or bank is None:
@@ -256,11 +288,63 @@ def _no_bank(bank: str) -> Decision:
     return Decision(False, 403, f"this API key has no access to bank {bank!r}")
 
 
-def visible_bank(client: Client | str, bank: str) -> bool:
-    return client == "admin" or (isinstance(client, Client) and client.can_read(bank))
+def visible_bank(client: Client | Member | str, bank: str) -> bool:
+    return client == "admin" or (isinstance(client, Client | Member) and client.can_read(bank))
 
 
-def load_policy(admin_key: str, keys: Mapping[str, str], access: str) -> Policy:
+ADMIN_PREFIX = "/admin/"
+_EMAIL = re.compile(r"^[^@\s/\\]+@[^@\s/\\]+$")
+
+
+@dataclass(frozen=True)
+class GrantsRoute:
+    """A request to the grants API: ``email`` is lowercased, or None for the bank's routes."""
+
+    action: str  # "bank", "grants" or "grant"
+    bank: str
+    email: str | None = None
+
+
+def grants_route(method: str, path: str) -> GrantsRoute | Decision:
+    """Parse a raw ``/admin/`` path, or refuse it with the :class:`Decision` to send."""
+    if "//" in path or "/./" in path or "/../" in path or path.endswith(("/.", "/..")):
+        return Decision(False, 400, "path is not normalised")
+    parts = path[len(ADMIN_PREFIX) :].rstrip("/").split("/")
+    if len(parts) < 2 or parts[0] != "banks" or len(parts) > 4:
+        return Decision(False, 404, "no such grants API route")
+    bank = _bank_segment(parts[1])
+    if bank is None:
+        return Decision(False, 400, "invalid bank id")
+    method = method.upper()
+    if len(parts) == 2:
+        return GrantsRoute("bank", bank) if method == "PUT" else _not_allowed()
+    if parts[2] != "grants":
+        return Decision(False, 404, "no such grants API route")
+    if len(parts) == 3:
+        return GrantsRoute("grants", bank) if method == "GET" else _not_allowed()
+    email = unquote(parts[3])
+    if not _EMAIL.match(email):
+        return Decision(False, 400, "not a single email address")
+    if method not in {"PUT", "DELETE"}:
+        return _not_allowed()
+    return GrantsRoute("grant", bank, email.lower())
+
+
+def _not_allowed() -> Decision:
+    return Decision(False, 405, "method not allowed")
+
+
+def check_member_access(issuer: str, audience: str) -> None:
+    """Refuse a member access configuration the gateway could not enforce."""
+    if not issuer.startswith("https://") or len(issuer) <= len("https://"):
+        raise PolicyError("member-issuer must be an https URL")
+    if not audience:
+        raise PolicyError("member-issuer needs member-audience")
+
+
+def load_policy(
+    admin_key: str, keys: Mapping[str, str], access: str, grants_key: str = ""
+) -> Policy:
     """Build a policy from the admin key, client keys and the bank-access YAML/JSON.
 
     ``keys`` maps client names to API keys (the ``access-keys`` secret).
@@ -269,6 +353,8 @@ def load_policy(admin_key: str, keys: Mapping[str, str], access: str) -> Policy:
     """
     if not admin_key:
         raise PolicyError("an admin key (tenant-api-key) is required")
+    if grants_key and (grants_key == admin_key or grants_key in keys.values()):
+        raise PolicyError("the grants key is the admin key or a client's key")
     try:
         mapping = json.loads(access) if access.strip() else {}
     except ValueError as exc:
@@ -296,4 +382,4 @@ def load_policy(admin_key: str, keys: Mapping[str, str], access: str) -> Policy:
             raise PolicyError(f"{name}: its key is the admin key or another client's")
         seen_keys.add(key)
         clients.append(Client(name, key, tuple(banks), tuple(read_banks)))
-    return Policy(admin_key=admin_key, clients=tuple(clients))
+    return Policy(admin_key=admin_key, clients=tuple(clients), grants_key=grants_key)
