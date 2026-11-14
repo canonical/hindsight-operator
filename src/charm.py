@@ -34,6 +34,11 @@ from pathlib import Path
 import ops
 import yaml
 from charms.data_platform_libs.v0.data_interfaces import DatabaseRequires
+from charms.prometheus_k8s.v0.prometheus_scrape import MetricsEndpointProvider
+from charms.tempo_coordinator_k8s.v0.tracing import (
+    ProtocolNotRequestedError,
+    TracingEndpointRequirer,
+)
 from charms.traefik_k8s.v2.ingress import IngressPerAppRequirer
 
 import hindsight_env
@@ -52,9 +57,12 @@ from defaults import (
     DATABASE_RELATION,
     GATEWAY_DIR,
     GATEWAY_FILES,
+    GATEWAY_METRICS_PORT,
     GATEWAY_SERVICE,
     INGRESS_RELATION,
+    METRICS_RELATION,
     PG0_DATA_DIR,
+    TRACING_RELATION,
     WORKLOAD_GROUP,
     WORKLOAD_USER,
 )
@@ -127,6 +135,20 @@ class HindsightCharm(ops.CharmBase):
         self.control_plane_ingress = IngressPerAppRequirer(
             self, relation_name=CONTROL_PLANE_INGRESS_RELATION, strip_prefix=True
         )
+        # The library publishes a default job on port 80 when it has none, so it
+        # exists only while the gateway, which serves the metrics, is configured.
+        self.metrics = (
+            MetricsEndpointProvider(
+                self,
+                relation_name=METRICS_RELATION,
+                jobs=[{"static_configs": [{"targets": [f"*:{GATEWAY_METRICS_PORT}"]}]}],
+            )
+            if self._gateway_configured()
+            else None
+        )
+        self.tracing = TracingEndpointRequirer(
+            self, relation_name=TRACING_RELATION, protocols=["otlp_http"]
+        )
 
         for event in (
             self.on[CONTAINER].pebble_ready,
@@ -140,6 +162,10 @@ class HindsightCharm(ops.CharmBase):
             self.on[CONTROL_PLANE_INGRESS_RELATION].relation_joined,
             self.on[CONTROL_PLANE_INGRESS_RELATION].relation_changed,
             self.on.leader_elected,
+            self.on.leader_settings_changed,
+            self.on[METRICS_RELATION].relation_joined,
+            self.tracing.on.endpoint_changed,
+            self.tracing.on.endpoint_removed,
         ):
             framework.observe(event, self._reconcile)
         # No-op handlers: these only exist so a check transition runs a hook,
@@ -166,6 +192,12 @@ class HindsightCharm(ops.CharmBase):
             return
         wanted = hindsight_env.proxy_environment(os.environ)
         if hindsight_env.planned_proxy(api.environment) != wanted:
+            self._reconcile(event)
+            return
+        # A unit that lost leadership may have had no hook to say so.
+        gateway = self.container.get_plan().services.get(GATEWAY_SERVICE)
+        planned = (gateway.environment if gateway else {}).get("HINDSIGHT_GATEWAY_LLM_USAGE")
+        if planned is not None and planned != ("1" if self.unit.is_leader() else "0"):
             self._reconcile(event)
 
     def _on_use_embedded_database(self, event: ops.ActionEvent) -> None:
@@ -229,8 +261,27 @@ class HindsightCharm(ops.CharmBase):
             self._stop_services(GATEWAY_SERVICE)
 
         ports = [API_PORT] + ([CONTROL_PLANE_PORT] if run_control_plane else [])
+        if state.gateway_env:
+            ports.append(GATEWAY_METRICS_PORT)
         self.unit.set_ports(*ports)
         self._sync_control_plane_ingress(publish=_control_plane_publishable(state))
+        self._sync_metrics()
+
+    def _gateway_configured(self) -> bool:
+        return bool(
+            str(self.config.get("bank-access") or "").strip()
+            or str(self.config.get("member-issuer") or "").strip()
+        )
+
+    def _sync_metrics(self) -> None:
+        """Publish the gateway's scrape job, or withdraw it (003 FR-011)."""
+        if self.metrics is not None:
+            self.metrics.set_scrape_job_spec()
+            return
+        for relation in self.model.relations[METRICS_RELATION]:
+            relation.data[self.unit].clear()
+            if self.unit.is_leader():
+                relation.data[self.app].clear()
 
     def _control_plane_lockout_key(self) -> str:
         """A random access key that locks the Control Plane; kept stable to avoid restarts."""
@@ -363,8 +414,25 @@ class HindsightCharm(ops.CharmBase):
             option = "grants-key" if "grants key" in str(exc) else "bank-access"
             raise StatusError(ops.BlockedStatus(f"{option}: {exc}")) from exc
         return hindsight_env.gateway_environment(
-            admin_key, keys, access_json, _gateway_digest(), members=members, api_env=api_env
+            admin_key,
+            keys,
+            access_json,
+            _gateway_digest(),
+            members=members,
+            api_env=api_env,
+            llm_usage=self.unit.is_leader(),
+            otlp_endpoint=self._tracing_endpoint(),
         )
+
+    def _tracing_endpoint(self) -> str:
+        """The tracing provider's OTLP HTTP endpoint, or "" (003 FR-016)."""
+        if not self.tracing.is_ready():
+            return ""
+        try:
+            return self.tracing.get_endpoint("otlp_http") or ""
+        except (ProtocolNotRequestedError, ops.ModelError):
+            # Not provided yet, and only the leader may read what was requested.
+            return ""
 
     def _member_access(self, issuer: str) -> hindsight_env.MemberAccess:
         """Validate the member access settings (002 FR-013); raise StatusError if invalid."""

@@ -170,3 +170,45 @@ def test_ann_iterative_scan_option_can_be_turned_off_and_overridden():
     assert _api_env(ann_iterative_scan=False)["HINDSIGHT_API_ANN_ITERATIVE_SCAN"] == "false"
     env = _api_env(ann_iterative_scan=False, extra_env="HINDSIGHT_API_ANN_ITERATIVE_SCAN=true")
     assert env["HINDSIGHT_API_ANN_ITERATIVE_SCAN"] == "true"
+
+
+def test_behind_the_gateway_llm_calls_are_traced_with_little_of_their_text():
+    """003 FR-008."""
+    assert "HINDSIGHT_API_LLM_TRACE_MAX_CHARS" not in _api_env()
+    env = _api_env(behind_gateway=True)
+    assert env["HINDSIGHT_API_LLM_TRACE_ENABLED"] == "true"
+    assert env["HINDSIGHT_API_LLM_TRACE_MAX_CHARS"] == "256"
+
+
+def test_the_operator_may_override_the_trace_settings():
+    """003 FR-008."""
+    env = _api_env(behind_gateway=True, extra_env="HINDSIGHT_API_LLM_TRACE_MAX_CHARS=5000")
+    assert env["HINDSIGHT_API_LLM_TRACE_MAX_CHARS"] == "5000"
+    env = _api_env(behind_gateway=True, secret_content={"llm-trace-enabled": "false"})
+    assert env["HINDSIGHT_API_LLM_TRACE_ENABLED"] == "false"
+
+
+def test_the_gateway_gets_the_database_and_schema_of_the_api():
+    """003 FR-005."""
+    api = {
+        "HINDSIGHT_API_DATABASE_URL": "postgresql://db/hs",
+        "HINDSIGHT_API_DATABASE_SCHEMA": "t1",
+    }
+    env = hindsight_env.gateway_environment("a", {}, "{}", "d", api_env=api, llm_usage=True)
+    assert env["HINDSIGHT_GATEWAY_DATABASE_URL"] == "postgresql://db/hs"
+    assert env["HINDSIGHT_GATEWAY_HINDSIGHT_SCHEMA"] == "t1"
+    assert env["HINDSIGHT_GATEWAY_LLM_USAGE"] == "1"
+
+
+def test_the_gateway_reaches_the_tracing_endpoint_through_the_model_proxy():
+    """003 FR-016: the endpoint, and the proxy settings to reach it, only when given."""
+    api = {"HTTPS_PROXY": "http://squid:3128", "no_proxy": "10.0.0.0/8"}
+    env = hindsight_env.gateway_environment(
+        "a", {}, "{}", "d", api_env=api, otlp_endpoint="http://tempo:4318"
+    )
+    assert env["HINDSIGHT_GATEWAY_OTLP_ENDPOINT"] == "http://tempo:4318"
+    assert env["HTTPS_PROXY"] == "http://squid:3128"
+    assert env["no_proxy"] == "10.0.0.0/8"
+    env = hindsight_env.gateway_environment("a", {}, "{}", "d", api_env=api)
+    assert "HINDSIGHT_GATEWAY_OTLP_ENDPOINT" not in env
+    assert "HTTPS_PROXY" not in env

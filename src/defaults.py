@@ -63,4 +63,8 @@ GATEWAY_FILES = (
     "usage.py",
 )
 API_INTERNAL_PORT = 8890
+# The gateway's metrics (003), never published through the ingress.
+GATEWAY_METRICS_PORT = 9464
+METRICS_RELATION = "metrics-endpoint"
+TRACING_RELATION = "tracing"
 UVICORN_BIN = "/app/api/.venv/bin/uvicorn"
