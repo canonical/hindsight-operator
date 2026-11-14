@@ -24,7 +24,7 @@ Run `tox -e lint,unit` before opening or updating a pull request. CI runs the sa
 
 ## Unit tests
 
-`tests/unit/` uses `ops.testing` (Scenario) for state transitions in `test_charm.py` and plain pytest for the pure functions in `test_hindsight_env.py`. The gateway's tests run it in front of a fake Hindsight API: `test_gateway_members.py` signs member tokens with a fake OpenID Connect issuer, and `test_gateway_grants.py` keeps grants in a real PostgreSQL that `pg0-embedded` starts, as the image's embedded database does.
+`tests/unit/` uses `ops.testing` (Scenario) for state transitions in `test_charm.py` and plain pytest for the pure functions in `test_hindsight_env.py`. The gateway's tests run it in front of a fake Hindsight API: `test_gateway_members.py` signs member tokens with a fake OpenID Connect issuer, and `test_gateway_grants.py` keeps grants in a real PostgreSQL that `pg0-embedded` starts, as the image's embedded database does. `test_gateway_usage.py` reads the request counts from the metrics port, and sweeps a real `llm_requests` table in the same PostgreSQL. `test_gateway_spans.py` checks the trace headers Hindsight receives, and the spans exported to an in-memory exporter and to a stand-in OTLP endpoint. `test_gateway_attribution.py` checks the documents recorded per retain, the sweep's join against `llm_requests` records carrying `metadata.document_id`, and the spans of the attributed calls. The PostgreSQL fixtures are in `tests/unit/conftest.py`.
 
 ```bash
 tox -e format,lint,unit
@@ -42,6 +42,7 @@ uv run --group lint ruff check src tests
 - `test_proxy.py`: LLM traffic follows the model's proxy settings, using a fake key. Nothing leaves the pod.
 - `test_bank_access.py`: per-key bank access on a live unit: the gateway in front of the API, isolation, read-only keys, admin-only routes, raw-path traversal, MCP, and turning the feature off.
 - `test_bank_access_scenarios.py`: per-key bank access as a story of two agents and an auditor storing and recalling real memories.
+- `test_usage_metrics.py`: usage metrics on a live unit. A stand-in OpenAI-compatible LLM in the pod answers Hindsight, and the metrics port shows the requests per client and the LLM calls of a retain with a `document_id` totalled under its client, and of one without as `unattributed`.
 - `test_published.py`: deploys a Charmhub release. Skipped unless `CHARM_CHANNEL` is set. `EXPECTED_CHARM_REVISION` pins the revision.
 
 Environment variables: `JUJU_CONTROLLER` (required), `CHARM_PATH`, `HINDSIGHT_IMAGE`, `KEEP_MODELS=1`.
@@ -56,4 +57,4 @@ The supported local setup is a throwaway LXD VM with its own MicroK8s controller
 
 ## CI
 
-`.github/workflows/ci.yaml` runs lint and unit tests, packs the charm on amd64 and arm64, and runs `test_embedded.py`, `test_proxy.py`, `test_bank_access.py` and `test_bank_access_scenarios.py` on a MicroK8s controller that `.github/actions/setup-k8s` bootstraps on each runner. The `spread` job runs `charmcraft test` on an amd64 runner, which packs the charm and, with `CI` set, runs the suite on the runner itself. `test_postgresql.py` is not run in CI.
+`.github/workflows/ci.yaml` runs lint and unit tests, packs the charm on amd64 and arm64, and runs `test_embedded.py`, `test_proxy.py`, `test_bank_access.py`, `test_bank_access_scenarios.py` and `test_usage_metrics.py` on a MicroK8s controller that `.github/actions/setup-k8s` bootstraps on each runner. The `spread` job runs `charmcraft test` on an amd64 runner, which packs the charm and, with `CI` set, runs the suite on the runner itself. `test_postgresql.py` is not run in CI.

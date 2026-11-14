@@ -42,7 +42,11 @@ A member's request is classified by the same `classify` as a client key's, and a
 
 ## §9 - Grants in their own schema
 
-The gateway keeps grants in the `hindsight_gateway` schema of Hindsight's database and never reads or writes Hindsight's own tables. Bank creation goes through Hindsight's API with the admin key.
+The gateway keeps grants in the `hindsight_gateway` schema of Hindsight's database and never writes Hindsight's own tables. Bank creation goes through Hindsight's API with the admin key.
+
+## §10 - Usage read from `llm_requests` only
+
+The only Hindsight table the gateway reads is `llm_requests`, for the LLM usage totals it keeps in the `hindsight_gateway` schema. It attributes an LLM call to a caller by joining the record's `metadata.document_id` to the documents it saw retained, never by reading memories or documents. No email, key or token goes into a metric label or a span.
 
 
 # Concepts
@@ -53,8 +57,8 @@ The gateway keeps grants in the `hindsight_gateway` schema of Hindsight's databa
 - `src/hindsight_env.py`: config, secret and relation data to environment variables for the API and Control Plane.
 - `src/workload.py`: the Pebble layer. Two services, `hindsight-api` and `hindsight-control-plane`, and their checks.
 - `src/defaults.py`: container paths, ports, service, check and relation names.
-- `src/gateway/`: the per-key bank-access gateway, shipped in the charm and pushed into the workload container. `policy.py` is pure: configuration parsing, key identification and request classification. `app.py` is the Starlette proxy. `identity.py` verifies member tokens, and `grants.py` keeps grants in PostgreSQL.
-- `lib/charms/`: vendored charm libraries, `data_platform_libs.v0.data_interfaces` and `traefik_k8s.v2.ingress`. Update them with `charmcraft fetch-libs`, never by hand.
+- `src/gateway/`: the per-key bank-access gateway, shipped in the charm and pushed into the workload container. `policy.py` is pure: configuration parsing, key identification and request classification. `app.py` is the Starlette proxy. `identity.py` verifies member tokens, and `grants.py` keeps grants in PostgreSQL. `usage.py` counts requests and serves the metrics port, `llm_usage.py` keeps the LLM usage totals and prices them, `attribution.py` records the documents each retain names, and `spans.py` continues the client's trace and exports the gateway's spans.
+- `lib/charms/`: vendored charm libraries, `data_platform_libs.v0.data_interfaces`, `traefik_k8s.v2.ingress`, `prometheus_k8s.v0.prometheus_scrape` and `tempo_coordinator_k8s.v0.tracing`. Update them with `charmcraft fetch-libs`, never by hand.
 
 ## Workload
 
@@ -81,6 +85,8 @@ The gateway keeps grants in the `hindsight_gateway` schema of Hindsight's databa
 
 - `database` (`postgresql_client`, limit 1, optional).
 - `ingress` (`ingress`): the API only, with the path prefix stripped. The Control Plane cannot be served under a prefix.
+- `metrics-endpoint` (`prometheus_scrape`, provided): a scrape job for port 9464 on every unit while `bank-access` or `member-issuer` is set. Otherwise the charm creates no `MetricsEndpointProvider`, which would publish a default job on port 80, and clears the relation data.
+- `tracing` (`tracing`, limit 1, optional): the leader requests `otlp_http`, and every unit passes the provider's endpoint to the gateway as `HINDSIGHT_GATEWAY_OTLP_ENDPOINT`. The API's own trace settings are left alone.
 
 ## Per-key bank access
 
@@ -99,3 +105,21 @@ The gateway keeps grants in the `hindsight_gateway` schema of Hindsight's databa
 - Grants are one table, `hindsight_gateway.bank_grants (bank_id, email, granted_at)`, which the gateway creates if it is missing. The gateway reads a member's grants on every request, so a change applies at once on every unit.
 - With an external database the gateway connects with the API's `HINDSIGHT_API_DATABASE_URL`. With pg0 it waits for the API to start pg0 and connects to the address pg0 reports.
 - `PUT /admin/banks/<bank>` checks `GET /v1/default/banks/<bank>/profile` and, on 404, calls `PUT /v1/default/banks/<bank>` with the admin key.
+
+## Usage metrics
+
+- The gateway serves `GET /metrics` on `0.0.0.0:9464` with a small asyncio listener in the same process, so it reads the same counters as the proxy on 8888. The ingress publishes only 8888.
+- Request counts are in memory and start at zero when the gateway restarts, as Prometheus counters may.
+- On the leader, `HINDSIGHT_GATEWAY_LLM_USAGE=1` makes the gateway sweep `llm_requests` every 30 seconds. One transaction, under a PostgreSQL advisory lock, adds the records not yet in `hindsight_gateway.llm_usage_counted` to `hindsight_gateway.llm_usage`, and marks them counted. IDs whose record Hindsight has deleted are then removed from `llm_usage_counted`. Leadership moving makes the charm restart both gateways with the setting moved.
+- The cost is computed when `/metrics` is read: uncached input tokens at `input_cost_per_token`, cached input tokens at `cache_read_input_token_cost` (or the input price when the list has none) and output tokens at `output_cost_per_token`. The model is looked up as `<provider>/<model>`, then as `<model>`.
+- Hindsight's own metrics come from `GET /metrics` on the API's loopback port with the admin key.
+
+## Traces
+
+- The gateway uses the OpenTelemetry SDK from the image's venv, with a `TracerProvider` of its own (service name `hindsight-gateway`), never the global one. Its sampler is the SDK's default, parent based and always on, so a client's sampled flag decides.
+- A span is started after a request is classified, so public routes get none, and ended when the response starts. Its attributes are `hindsight.client`, `hindsight.bank` (when allowed), `hindsight.operation`, `http.request.method` and `http.response.status_code`. A 5xx sets the span's status to error.
+- The client's `traceparent` and `tracestate` are replaced on the way to Hindsight by the span's. `baggage` passes unchanged. Calls the gateway makes on its own account for a request, such as the bank check of the grants API, carry the same `traceparent`.
+- With `HINDSIGHT_GATEWAY_OTLP_ENDPOINT`, a batch processor exports to `<endpoint>/v1/traces`, through the model's proxy, which the charm passes to the gateway. The provider is shut down, and its spans flushed, when the gateway stops.
+- Hindsight 0.9.2 writes a `trace_id` of its own making to each `llm_requests` record. When Hindsight continues an incoming trace, that ID joins an LLM call to the gateway's span, and so to its caller (003 Out of Scope).
+- Until then, retain calls are joined by document (003 FR-018 to FR-020). Every unit writes `hindsight_gateway.retained_documents` (bank, document, caller, trace, span, sampled) before forwarding a retain, so the row exists before Hindsight's first extraction call. The leader's sweep is one statement: it left joins the new `llm_requests` records to `retained_documents`, adds them to `llm_usage` by bank, client, operation, provider and model, and returns the attributed calls of sampled traces. `spans.llm_calls` then starts each call's span under a remote parent built from the stored trace and span IDs, with the record's own start and end times.
+- Hindsight cuts a record's metadata to `HINDSIGHT_API_LLM_TRACE_MAX_CHARS` like its prompt and output, which is why the charm sets 256 and not 1.

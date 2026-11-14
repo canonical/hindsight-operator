@@ -83,6 +83,22 @@ While this relation exists, the Control Plane runs only with `hindsight-cp-acces
 
 Without an ingress, reach the UI with `kubectl port-forward svc/hindsight 9999 -n <model>`.
 
+### Observability
+
+To have the Canonical Observability Stack (COS) scrape the charm's metrics:
+
+```shell
+juju integrate hindsight:metrics-endpoint prometheus-k8s
+```
+
+To have COS keep the gateway's traces:
+
+```shell
+juju integrate hindsight:tracing tempo
+```
+
+The metrics and traces come from the gateway, so they exist while `bank-access` or `member-issuer` is set. See [Usage metrics](#usage-metrics) and [Traces](#traces).
+
 ## Per-key bank access
 
 Give each client application its own API key, limited to the memory banks it may use. `banks` are read and write, `read-banks` are read only, and names may be shell-style patterns:
@@ -141,6 +157,33 @@ The provisioning system sends the grants key as `Authorization: Bearer <key>` to
 | `DELETE /admin/banks/<bank>/grants/<email>` | withdraws the grant, or 404 if there is none |
 
 A grant applies to the member's next request on every unit. Grants are kept in Hindsight's database, in a `hindsight_gateway` schema of their own, so they are shared by every unit and kept when member access is turned off. Clear `member-issuer` to turn member access off.
+
+## Usage metrics
+
+While the gateway runs, each unit serves metrics in the Prometheus text format at `http://<unit>:9464/metrics`. The port is not published through `ingress`.
+
+- `hindsight_gateway_requests_total` counts the requests each unit answered, labeled by `client`, `bank`, `operation` and `code`. `client` is the client's name from `bank-access`, or `admin`, `grants`, `member` or `unauthenticated`. Members are counted together: no email reaches the metrics. `bank` is set only on an allowed request. `operation` is one of `retain`, `recall`, `reflect`, `read`, `write`, `delete-bank`, `list-banks`, `mcp`, `grants`, `admin` and `invalid`. `code` is the status class, such as `2xx`.
+- `hindsight_gateway_llm_calls_total`, `hindsight_gateway_llm_tokens_total` (with `type` `input`, `output` or `cached`) and `hindsight_gateway_llm_cost_usd_total` are the LLM calls, tokens and cost of each bank, labeled by `bank`, `client`, `operation`, `provider` and `model`. `client` is the caller that retained the document an LLM call extracts from, named as in `hindsight_gateway_requests_total`, or `unattributed` (see below). `operation` is Hindsight's, such as `retain`, `reflect` or `consolidation`. Sum over `client` and `operation` for a bank's total. Only the leader unit serves them, so a sum across units counts each call once. The cost is priced with the LiteLLM price list in the Hindsight image, and is missing for a model the list does not name.
+- `hindsight_gateway_llm_usage_up` is 0 while Hindsight's database cannot be read.
+- Hindsight's own metrics follow.
+
+The LLM totals come from the record Hindsight keeps of each LLM call, which it deletes after `HINDSIGHT_API_LLM_TRACE_RETENTION_DAYS` (one day by default). The leader adds each record to the totals once, a minute or less after Hindsight writes it, and the totals are kept in the `hindsight_gateway` schema. While the gateway runs, the charm has Hindsight keep the record with at most 256 characters of each prompt, output and metadata, by setting `HINDSIGHT_API_LLM_TRACE_ENABLED=true` and `HINDSIGHT_API_LLM_TRACE_MAX_CHARS=256`. The start of a prompt is Hindsight's own instructions, and the start of an output can hold facts extracted from a retain, which Hindsight also keeps as memories. Setting either in `extra-env` or `env-secret` overrides the charm, and turning tracing off stops the LLM totals.
+
+Hindsight 0.9.2 does not record which request caused an LLM call, but it records the document a retain's extraction call reads. Before forwarding a retain, over the HTTP API or an MCP `retain` or `sync_retain` tool, the gateway records each document ID the retain names, with the caller and the request's span, for 7 days. The leader totals each extraction call under the caller that last retained its document in that bank. These calls stay `unattributed`:
+
+- the calls of a retain item sent without a `document_id`, which Hindsight gives an ID the gateway never sees. Give each item a `document_id` to have its calls attributed.
+- the calls of a document ID longer than about 230 characters, which does not fit in the metadata Hindsight keeps.
+- reflect, consolidation and mental model calls, and file retains.
+
+The gateway never changes a retain. If the record cannot be written within 2 seconds, the retain is forwarded and its calls stay `unattributed`.
+
+## Traces
+
+While the gateway runs, it records a span for each request it counts in the metrics, with the same `client`, `bank`, `operation` and status as attributes. A request that arrives with a W3C `traceparent` header gets its span in that trace; any other request starts a new trace. The call to Hindsight carries a `traceparent` naming the gateway's span as its parent. No key, token, email, path or body goes into a span.
+
+Related to a tracing provider such as Tempo over `tracing`, the gateway exports its spans over OTLP HTTP. Without the relation, trace headers are still passed on, and nothing is exported.
+
+Hindsight 0.9.2 does not continue the trace it receives: it starts a trace of its own for each operation. The leader adds a span for each LLM call it attributes to a retain, as above, under that retain's gateway span, once Hindsight has recorded the call. The span carries the call's start and end times, provider, model and tokens, and no prompt, output or document ID. Other LLM calls, such as reflect's, do not appear in the client's trace. The charm does not turn on Hindsight's own trace export (`HINDSIGHT_API_OTEL_TRACES_ENABLED`), which records whole prompts and outputs.
 
 ## Security
 
